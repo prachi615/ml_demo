@@ -1,0 +1,157 @@
+# CI/CD for the storm forecasting Vertex AI pipelines.
+#
+#   pull_request -> lint + unit tests + compile pipelines
+#   push to main -> CI + build/push image + publish pipeline templates + run training + refresh schedules in DEV
+#   tag v*       -> CI + same deployment into PROD (GitHub environment "prod" should require reviewers)
+#
+# Auth uses Workload Identity Federation (no JSON keys). Per GitHub environment set:
+#   vars.GCP_PROJECT_ID, secrets.WIF_PROVIDER, secrets.DEPLOYER_SA   (see infra/setup_gcp.sh)
+name: ci-cd
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      run_training:
+        description: "Submit a training run after deploying"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+  REGION: us-central1
+  AR_DOCKER_REPO: storm-ml
+  AR_KFP_REPO: storm-pipelines
+  IMAGE_NAME: storm-pipeline
+
+jobs:
+  ci:
+    name: Lint, test, compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install
+        run: |
+          pip install -r requirements-dev.txt
+          pip install --no-deps -e .
+
+      - name: Lint
+        run: ruff check src scripts tests
+
+      - name: Unit tests
+        run: pytest --cov=storm_prediction --cov-report=term-missing --cov-report=xml
+
+      - name: Compile pipelines
+        run: python scripts/compile_pipelines.py --output-dir build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiled-pipelines
+          path: build/*.yaml
+
+  deploy:
+    name: Deploy (${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }})
+    needs: ci
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DEPLOY_ENV: ${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: vars
+        name: Derive names
+        run: |
+          TAG="sha-${GITHUB_SHA::12}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_DOCKER_REPO}/${IMAGE_NAME}:${TAG}" >> "$GITHUB_OUTPUT"
+          echo "kfp_host=https://${REGION}-kfp.pkg.dev/${GCP_PROJECT_ID}/${AR_KFP_REPO}" >> "$GITHUB_OUTPUT"
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SA }}
+          token_format: access_token
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push component image
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "${{ steps.vars.outputs.image }}" .
+          docker push "${{ steps.vars.outputs.image }}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install --no-deps -e .
+
+      - name: Compile and publish pipeline templates to Artifact Registry
+        env:
+          PIPELINE_IMAGE: ${{ steps.vars.outputs.image }}
+        run: |
+          python scripts/compile_pipelines.py \
+            --output-dir build \
+            --registry-host "${{ steps.vars.outputs.kfp_host }}" \
+            --tag "${{ steps.vars.outputs.tag }}" \
+            --tag "${DEPLOY_ENV}"
+
+      - name: Submit training pipeline
+        if: github.event_name != 'workflow_dispatch' || inputs.run_training
+        run: |
+          python scripts/run_pipeline.py \
+            --pipeline training \
+            --config "configs/${DEPLOY_ENV}.yaml" \
+            --template "${{ steps.vars.outputs.kfp_host }}/storm-forecast-training/${{ steps.vars.outputs.tag }}"
+
+      - name: (Re)create evaluation + batch inference schedules
+        run: |
+          HOST="${{ steps.vars.outputs.kfp_host }}"
+          TAG="${{ steps.vars.outputs.tag }}"
+          CFG="configs/${DEPLOY_ENV}.yaml"
+          EVAL_CRON=$(python -c "import yaml;print(yaml.safe_load(open('${CFG}'))['schedules']['evaluation'])")
+          BATCH_CRON=$(python -c "import yaml;print(yaml.safe_load(open('${CFG}'))['schedules']['batch_inference'])")
+
+          python scripts/run_pipeline.py --pipeline evaluation --config "$CFG" \
+            --template "${HOST}/storm-forecast-evaluation/${TAG}" \
+            --training-template "${HOST}/storm-forecast-training/${TAG}" \
+            --schedule "$EVAL_CRON"
+
+          python scripts/run_pipeline.py --pipeline batch_inference --config "$CFG" \
+            --template "${HOST}/storm-forecast-batch-inference/${TAG}" \
+            --schedule "$BATCH_CRON"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed to ${DEPLOY_ENV}"
+            echo "- Image: \`${{ steps.vars.outputs.image }}\`"
+            echo "- Templates: \`${{ steps.vars.outputs.kfp_host }}\` tag \`${{ steps.vars.outputs.tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
