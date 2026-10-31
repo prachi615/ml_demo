@@ -1,4 +1,10 @@
-"""Compile all pipelines to KFP IR YAML and optionally push them to Artifact Registry.
+"""Compile all pipelines to KFP YAML and optionally push them to Artifact Registry.
+
+Compiling turns each Python ``@dsl.pipeline`` into a YAML template that Vertex AI
+Pipelines can run. CI runs this with ``PIPELINE_IMAGE`` set to the image it just
+built, then publishes the templates to an Artifact Registry "KFP" repository.
+
+Examples:
 
     PIPELINE_IMAGE=<image:tag> python scripts/compile_pipelines.py --output-dir build
     python scripts/compile_pipelines.py --output-dir build \
@@ -15,6 +21,12 @@ from kfp import compiler
 
 
 def main() -> None:
+    """Compile every pipeline in ``PIPELINES`` and optionally upload it.
+
+    The component image is read from the ``PIPELINE_IMAGE`` environment variable
+    when the pipeline modules are imported, so it must be set before running.
+    Uploaded templates are tagged ``latest`` plus any ``--tag`` values.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default="build")
     parser.add_argument("--registry-host", default="", help="Artifact Registry KFP repo URL")

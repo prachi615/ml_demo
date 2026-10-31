@@ -33,6 +33,23 @@ def batch_inference_pipeline(
     model_display_name: str = "storm-weekly-event-forecaster",
     model_alias: str = "champion",
 ):
+    """Forecast next week's storm events per state with the champion model.
+
+    Args:
+        project: GCP project for BigQuery, Vertex AI and the registry.
+        location: Vertex AI region.
+        bq_location: BigQuery location (``US``).
+        bq_dataset: BigQuery dataset holding all project tables.
+        raw_table: Raw storm events table name.
+        features_table: Weekly feature table name.
+        predictions_table: Table the forecasts are appended to.
+        start_year: First year of NOAA data to load.
+        end_year: Last year of NOAA data to load.
+        refresh_raw_data: Re-copy the raw data from the public dataset.
+        model_display_name: Model Registry entry name.
+        model_alias: Version alias to score with (normally ``champion``).
+    """
+    # 1-2. Refresh raw data and features; this also creates the forecast rows.
     ingest = ingest_raw_storm_events(
         project=project,
         bq_location=bq_location,
@@ -53,6 +70,7 @@ def batch_inference_pipeline(
     ).set_display_name("build-feature-table")
     features.set_caching_options(False)
 
+    # 3. Take the forecast rows (next unseen week, one per state).
     scoring = extract_scoring_rows(
         project=project,
         bq_location=bq_location,
@@ -60,6 +78,7 @@ def batch_inference_pipeline(
     ).set_display_name("extract-scoring-rows")
     scoring.set_caching_options(False)
 
+    # 4. Load the live model from the registry.
     champion = load_registered_model(
         project=project,
         location=location,
@@ -68,6 +87,7 @@ def batch_inference_pipeline(
     ).set_display_name("load-champion-model")
     champion.set_caching_options(False)
 
+    # 5. Predict and append the forecasts to BigQuery.
     batch_predict(
         project=project,
         bq_location=bq_location,

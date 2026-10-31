@@ -1,5 +1,10 @@
 """Submit a compiled pipeline to Vertex AI Pipelines, or (re)create its schedule.
 
+Pipeline parameters are built from an environment config (``configs/<env>.yaml``),
+so the same compiled template runs in dev, rc and prod.
+
+Examples:
+
     python scripts/run_pipeline.py --pipeline training --config configs/dev.yaml
     python scripts/run_pipeline.py --pipeline batch_inference --config configs/prod.yaml \
         --template https://us-central1-kfp.pkg.dev/<project>/storm-pipelines/<template>/latest \
@@ -17,11 +22,13 @@ from google.cloud import aiplatform
 
 from storm_prediction.config import load_config
 
+# Display name prefix of each pipeline's runs and schedules.
 DISPLAY_NAMES = {
     "training": "storm-forecast-training",
     "evaluation": "storm-forecast-evaluation",
     "batch_inference": "storm-forecast-batch-inference",
 }
+# Local compiled templates used when --template is not given (see `make compile`).
 DEFAULT_TEMPLATES = {
     "training": "build/training_pipeline.yaml",
     "evaluation": "build/evaluation_pipeline.yaml",
@@ -30,6 +37,14 @@ DEFAULT_TEMPLATES = {
 
 
 def common_params(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Build the parameters shared by all three pipelines from a config.
+
+    Args:
+        cfg: Parsed environment config (``configs/<env>.yaml``).
+
+    Returns:
+        Pipeline parameter name -> value.
+    """
     bq, data = cfg["bigquery"], cfg["data"]
     return {
         "project": cfg["project_id"],
@@ -46,6 +61,16 @@ def common_params(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def training_params(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Build the training pipeline parameters from a config.
+
+    Also used to tell the evaluation pipeline how to launch a retraining run.
+
+    Args:
+        cfg: Parsed environment config.
+
+    Returns:
+        Pipeline parameter name -> value. Hyperparameters are passed as one JSON string.
+    """
     tr = cfg["training"]
     params = {
         **common_params(cfg),
@@ -61,6 +86,20 @@ def training_params(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_params(pipeline: str, cfg: dict[str, Any], training_template: str) -> dict[str, Any]:
+    """Build the parameter values for the chosen pipeline.
+
+    Args:
+        pipeline: ``training``, ``evaluation`` or ``batch_inference``.
+        cfg: Parsed environment config.
+        training_template: Training template the evaluation pipeline submits when
+            it triggers retraining (ignored by the other pipelines).
+
+    Returns:
+        Pipeline parameter name -> value.
+
+    Raises:
+        ValueError: For an unknown pipeline name.
+    """
     if pipeline == "training":
         return training_params(cfg)
     if pipeline == "evaluation":
@@ -82,6 +121,11 @@ def build_params(pipeline: str, cfg: dict[str, Any], training_template: str) -> 
 
 
 def main() -> None:
+    """Parse the command line, then submit one run or (re)create a schedule.
+
+    With ``--schedule``, any existing schedule with the same display name is
+    deleted first, so redeploying never creates duplicate schedules.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--pipeline", required=True, choices=sorted(DISPLAY_NAMES))
     parser.add_argument("--config", required=True)
@@ -98,6 +142,7 @@ def main() -> None:
     parser.add_argument("--sync", action="store_true", help="Wait for the run to finish")
     args = parser.parse_args()
 
+    # Expands ${GCP_PROJECT_ID} etc. from the environment.
     cfg = load_config(args.config)
     aiplatform.init(
         project=cfg["project_id"], location=cfg["region"], staging_bucket=cfg.get("staging_bucket")
@@ -115,6 +160,7 @@ def main() -> None:
     service_account = cfg.get("service_account") or None
 
     if args.schedule:
+        # Replace, don't duplicate: delete the old schedule before creating the new one.
         schedule_name = f"{display_name}-schedule"
         for existing in aiplatform.PipelineJobSchedule.list(filter=f'display_name="{schedule_name}"'):
             print(f"deleting old schedule {existing.resource_name}")

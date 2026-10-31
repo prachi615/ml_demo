@@ -1,7 +1,24 @@
 #!/usr/bin/env bash
+# -----------------------------------------------------------------------------
 # One-time GCP bootstrap for the storm forecasting project.
-#   usage: PROJECT_ID=my-proj GITHUB_REPO=owner/repo ./infra/setup_gcp.sh
-set -euo pipefail
+#
+# Run it once per environment (dev, rc, prod), each in its own GCP project:
+#
+#   PROJECT_ID=my-storm-dev GITHUB_REPO=owner/repo ./infra/setup_gcp.sh
+#
+# It is safe to re-run: "create" commands that hit an existing resource are
+# ignored (`|| true`), and IAM bindings are idempotent.
+#
+# Creates:
+#   * required APIs
+#   * GCS bucket gs://<project>-storm-ml   (pipeline artifacts + staging)
+#   * BigQuery dataset storm_ml (US)       (all project tables)
+#   * Artifact Registry: storm-ml (Docker images), storm-pipelines (KFP templates)
+#   * service account vertex-pipelines     (identity the pipelines run as)
+#   * service account github-deployer      (identity GitHub Actions deploys as)
+#   * Workload Identity Federation pool    (lets GitHub Actions log in without keys)
+# -----------------------------------------------------------------------------
+set -euo pipefail   # stop on the first error, unset variable or failed pipe
 
 : "${PROJECT_ID:?set PROJECT_ID}"
 : "${GITHUB_REPO:?set GITHUB_REPO (owner/repo) for Workload Identity Federation}"
@@ -15,23 +32,29 @@ PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(project
 
 gcloud config set project "$PROJECT_ID"
 
+# --- APIs --------------------------------------------------------------------
 echo ">> Enabling APIs"
 gcloud services enable aiplatform.googleapis.com bigquery.googleapis.com bigquerystorage.googleapis.com \
   storage.googleapis.com artifactregistry.googleapis.com iamcredentials.googleapis.com \
   cloudresourcemanager.googleapis.com sts.googleapis.com
 
+# --- Storage -------------------------------------------------------------------
 echo ">> Storage + BigQuery"
 gcloud storage buckets create "$BUCKET" --location="$REGION" --uniform-bucket-level-access || true
 bq --location="$BQ_LOCATION" mk --dataset --description "Storm forecasting (NOAA)" "${PROJECT_ID}:${BQ_DATASET}" || true
 
+# --- Artifact Registry ---------------------------------------------------------
 echo ">> Artifact Registry (Docker images + KFP pipeline templates)"
 gcloud artifacts repositories create storm-ml --repository-format=docker --location="$REGION" || true
 gcloud artifacts repositories create storm-pipelines --repository-format=kfp --location="$REGION" || true
 
+# --- Service accounts and permissions -----------------------------------------
 echo ">> Service accounts"
 gcloud iam service-accounts create vertex-pipelines --display-name="Vertex AI Pipelines runtime" || true
 gcloud iam service-accounts create github-deployer --display-name="GitHub Actions deployer" || true
 
+# Pipeline runtime: run Vertex AI jobs, read/write BigQuery, read/write the bucket,
+# pull the component image.
 for role in roles/aiplatform.user roles/bigquery.dataEditor roles/bigquery.jobUser \
             roles/bigquery.readSessionUser roles/storage.objectAdmin roles/artifactregistry.reader; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${PIPELINES_SA}" \
@@ -41,13 +64,18 @@ done
 gcloud iam service-accounts add-iam-policy-binding "$PIPELINES_SA" \
   --member="serviceAccount:${PIPELINES_SA}" --role=roles/iam.serviceAccountUser --quiet >/dev/null
 
+# Deployer (GitHub Actions): push images/templates, submit pipeline runs and schedules.
 for role in roles/aiplatform.user roles/artifactregistry.writer roles/storage.objectAdmin; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${DEPLOYER_SA}" \
     --role="$role" --condition=None --quiet >/dev/null
 done
+# The deployer may start pipelines that run as the pipelines service account.
 gcloud iam service-accounts add-iam-policy-binding "$PIPELINES_SA" \
   --member="serviceAccount:${DEPLOYER_SA}" --role=roles/iam.serviceAccountUser --quiet >/dev/null
 
+# --- Workload Identity Federation ----------------------------------------------
+# GitHub Actions gets a short-lived OIDC token per run; GCP trusts it only for
+# GITHUB_REPO and lets it act as the deployer service account. No JSON keys.
 echo ">> Workload Identity Federation for GitHub Actions"
 gcloud iam workload-identity-pools create github --location=global --display-name="GitHub" || true
 gcloud iam workload-identity-pools providers create-oidc github-oidc --location=global \

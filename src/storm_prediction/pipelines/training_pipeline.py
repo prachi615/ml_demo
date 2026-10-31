@@ -48,6 +48,28 @@ def training_pipeline(
     model_display_name: str = "storm-weekly-event-forecaster",
     serving_container_image_uri: str = PIPELINE_IMAGE,
 ):
+    """Train four models, compare them and register the best one.
+
+    Args:
+        project: GCP project for BigQuery, Vertex AI and the registry.
+        location: Vertex AI region.
+        bq_location: BigQuery location (``US``, same as the public NOAA dataset).
+        bq_dataset: BigQuery dataset holding all project tables.
+        raw_table: Raw storm events table name.
+        features_table: Weekly feature table name.
+        leaderboard_table: Table receiving one row per model per run.
+        start_year: First year of NOAA data to load.
+        end_year: Last year of NOAA data to load.
+        refresh_raw_data: Re-copy the raw data from the public dataset.
+        val_weeks: Weeks in the validation split.
+        test_weeks: Weeks in the test split.
+        hyperparameters_json: Per-model hyperparameters as JSON (see models.py).
+        min_improvement_pct: Required test-RMSE gain over the best linear baseline.
+        model_display_name: Model Registry entry name.
+        serving_container_image_uri: Image recorded with the registered model.
+    """
+    # 1. Copy NOAA data into our BigQuery dataset. Caching is off for data steps
+    #    because the source tables change between runs.
     ingest = ingest_raw_storm_events(
         project=project,
         bq_location=bq_location,
@@ -59,6 +81,7 @@ def training_pipeline(
     ).set_display_name("ingest-noaa-to-bigquery")
     ingest.set_caching_options(False)
 
+    # 2. Rebuild the weekly feature table in BigQuery.
     features = build_feature_table(
         project=project,
         bq_location=bq_location,
@@ -68,6 +91,7 @@ def training_pipeline(
     ).set_display_name("build-feature-table")
     features.set_caching_options(False)
 
+    # 3. Pull labelled rows and split them by time into train / val / test.
     splits = extract_training_splits(
         project=project,
         bq_location=bq_location,
@@ -77,6 +101,8 @@ def training_pipeline(
     ).set_display_name("extract-train-val-test")
     splits.set_caching_options(False)
 
+    # 4. Train and test-evaluate the four models. The loop runs at compile time and
+    #    creates 4 independent branches, which Vertex AI runs in parallel.
     trained, evaluated = {}, {}
     for model_type in MODEL_TYPES:
         train_task = (
@@ -98,6 +124,7 @@ def training_pipeline(
         ).set_display_name(f"evaluate-{model_type}")
         trained[model_type], evaluated[model_type] = train_task, eval_task
 
+    # 5. Choose the winner (validation RMSE) and check it against the baselines (test RMSE).
     select = select_best_model(
         linear_regression_model=trained["linear_regression"].outputs["model"],
         ridge_model=trained["ridge"].outputs["model"],
@@ -114,6 +141,7 @@ def training_pipeline(
         min_improvement_pct=min_improvement_pct,
     ).set_display_name("select-best-model")
 
+    # 6. Keep a history of every run's leaderboard in BigQuery.
     write_leaderboard(
         project=project,
         bq_location=bq_location,
@@ -125,6 +153,7 @@ def training_pipeline(
         leaderboard=select.outputs["leaderboard"],
     ).set_display_name("write-leaderboard-to-bigquery")
 
+    # 7. Register only if a challenger clearly beats the linear baselines.
     with dsl.If(select.outputs["beats_baselines"] == True, name="beats-baselines"):  # noqa: E712
         register_model(
             project=project,

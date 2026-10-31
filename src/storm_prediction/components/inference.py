@@ -1,4 +1,9 @@
-"""Batch inference component."""
+"""Batch inference component.
+
+Scoring runs inside a pipeline component instead of Vertex AI's built-in batch
+prediction job: the saved model is a scikit-learn pipeline that may contain
+XGBoost, which the prebuilt scikit-learn serving container cannot load.
+"""
 
 from kfp import dsl
 from kfp.dsl import Dataset, Input, Model, Output
@@ -18,7 +23,27 @@ def batch_predict(
     scoring_data: Input[Dataset],
     predictions: Output[Dataset],
 ) -> int:
-    """Score forecast rows with the champion and append results to BigQuery."""
+    """Forecast next week's storm events for every state and save to BigQuery.
+
+    Each output row has the state, forecast week, predicted event count, the
+    state's trailing 52-week average and a ``risk_level`` label (low / normal /
+    elevated / high) comparing the two. Model version and pipeline run are
+    stored with each prediction for lineage.
+
+    Args:
+        project: GCP project used to write the predictions.
+        bq_location: BigQuery location.
+        predictions_table_id: Fully qualified predictions table id (appended to).
+        pipeline_job_name: Name of the current pipeline run.
+        model_version: Registry version used, from ``load_registered_model``.
+        model_type: Its model type.
+        model: Model directory containing ``model.joblib``.
+        scoring_data: Parquet with the forecast rows.
+        predictions: Output parquet copy of the predictions.
+
+    Returns:
+        The number of predictions written.
+    """
     import os
     from datetime import datetime, timezone
 
@@ -33,6 +58,7 @@ def batch_predict(
     df = pd.read_parquet(scoring_data.path)
     estimator = joblib.load(os.path.join(model.path, "model.joblib"))
 
+    # The saved estimator includes preprocessing, so raw feature columns go straight in.
     out = pd.DataFrame(
         {
             "state": df["state"].astype(str),
@@ -42,6 +68,7 @@ def batch_predict(
         }
     )
     out["risk_level"] = risk_level(out["predicted_event_count"], out["trailing_52w_mean"])
+    # Lineage: which model and which run produced each prediction.
     out["model_version"] = model_version
     out["model_type"] = model_type
     out["pipeline_job_name"] = pipeline_job_name

@@ -1,3 +1,5 @@
+"""Shared pytest fixtures."""
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,7 +9,11 @@ from storm_prediction.features import NUMERIC_FEATURES, TARGET
 
 @pytest.fixture
 def feature_frame() -> pd.DataFrame:
-    """Synthetic frame with the same schema as the BigQuery feature table."""
+    """Synthetic frame with the same schema as the BigQuery feature table.
+
+    Four states x 208 weeks with a seasonal signal plus noise, so models have
+    something learnable and time splits have enough history. No GCP needed.
+    """
     rng = np.random.default_rng(0)
     states = ["Texas", "Kansas", "Ohio", "Florida"]
     weeks = pd.date_range("2018-01-01", periods=208, freq="W-MON")

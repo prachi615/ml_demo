@@ -140,26 +140,21 @@ Each prediction row carries `model_version`, `model_type`, `pipeline_job_name` a
 
 ```
 .
-├── .github/workflows/ci-cd.yaml        # CI (lint/test/compile) + CD (image, templates, runs, schedules)
-├── configs/{dev,rc,prod}.yaml          # environment config (${GCP_PROJECT_ID} is expanded)
-├── infra/setup_gcp.sh                  # one-time GCP bootstrap (APIs, bucket, BQ, AR, SAs, WIF)
-├── scripts/
-│   ├── compile_pipelines.py            # compile → build/*.yaml, optional push to Artifact Registry
-│   └── run_pipeline.py                 # submit a run or (re)create a schedule
-├── src/storm_prediction/
-│   ├── sql/ingest_raw.sql              # public NOAA → our raw table
-│   ├── sql/build_features.sql          # leak-free weekly features + forecast rows
-│   ├── components/                     # KFP components
-│   │   ├── data.py                     #   ingest, features, splits, eval window, scoring rows
-│   │   ├── training.py                 #   train, evaluate, select, leaderboard, register
-│   │   ├── monitoring.py               #   load registry model, naive baselines, health check, retrain trigger
-│   │   └── inference.py                #   batch predict → BigQuery
-│   ├── pipelines/                      # the three @dsl.pipeline definitions
-│   ├── models.py  features.py  metrics.py  data.py  gcp.py  config.py
-├── tests/                              # unit tests + pipeline compilation tests
-├── Dockerfile                          # single image used by every component
-├── Makefile  pyproject.toml  requirements*.txt
+├── .github/workflows/               # CI/CD: ci-cd.yaml (dev → rc → prod)            [README]
+├── configs/                         # dev.yaml, rc.yaml, prod.yaml                     [README]
+├── infra/                           # setup_gcp.sh: one-time GCP bootstrap             [README]
+├── scripts/                         # compile_pipelines.py, run_pipeline.py            [README]
+├── src/storm_prediction/            # the Python package                               [README]
+│   ├── sql/                         #   BigQuery: raw ingestion + weekly features      [README]
+│   ├── components/                  #   KFP components (pipeline steps)                [README]
+│   ├── pipelines/                   #   training, evaluation, batch inference          [README]
+│   └── models.py features.py metrics.py data.py gcp.py config.py
+├── tests/                           # unit + pipeline compilation tests                [README]
+├── Dockerfile                       # single image used by every component
+└── Makefile  pyproject.toml  requirements*.txt
 ```
+
+Every folder has its own `README.md` describing its files in more detail.
 
 Every component runs in **one custom image** that has the `storm_prediction` package installed.
 The component functions stay thin and import tested library code, and the image tag is injected at compile time through `PIPELINE_IMAGE`.
