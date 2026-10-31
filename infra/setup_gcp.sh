@@ -61,7 +61,7 @@ gcloud iam service-accounts add-iam-policy-binding "$DEPLOYER_SA" \
 
 cat <<MSG
 
-Done. Configure the GitHub environment (dev / prod) with:
+Done. Configure the matching GitHub environment (dev / rc / prod) with:
   vars.GCP_PROJECT_ID   = ${PROJECT_ID}
   secrets.WIF_PROVIDER  = projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github/providers/github-oidc
   secrets.DEPLOYER_SA   = ${DEPLOYER_SA}

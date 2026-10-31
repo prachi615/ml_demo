@@ -141,7 +141,7 @@ Each prediction row carries `model_version`, `model_type`, `pipeline_job_name` a
 ```
 .
 ├── .github/workflows/ci-cd.yaml        # CI (lint/test/compile) + CD (image, templates, runs, schedules)
-├── configs/{dev,prod}.yaml             # environment config (${GCP_PROJECT_ID} is expanded)
+├── configs/{dev,rc,prod}.yaml          # environment config (${GCP_PROJECT_ID} is expanded)
 ├── infra/setup_gcp.sh                  # one-time GCP bootstrap (APIs, bucket, BQ, AR, SAs, WIF)
 ├── scripts/
 │   ├── compile_pipelines.py            # compile → build/*.yaml, optional push to Artifact Registry
@@ -230,37 +230,80 @@ ORDER BY predicted_event_count DESC;
 
 ## 7. CI/CD (`.github/workflows/ci-cd.yaml`)
 
-Nothing runs when a pull request is opened or updated. The workflow starts only after a PR is approved and merged.
+### Branches, tags and environments
 
-| Trigger | Jobs |
-|---|---|
-| PR approved and merged into `main` | **ci** (ruff lint, pytest with coverage, compile all pipelines) → **deploy (dev)** |
-| Tag `v*` on `main` | **ci** → **deploy (prod)**; protect the `prod` GitHub environment with required reviewers |
-| Manual (`workflow_dispatch`) | **ci** → **deploy**, with an option to skip the training run |
+| Branch / tag | Purpose | GitHub environment / GCP project |
+|---|---|---|
+| feature branches | day-to-day work | — |
+| `dev` | integration branch; every approved merge deploys | `dev` |
+| tag `vX.Y.Z-rcN` on `dev` | release candidate | `rc` |
+| `rc` | maintained by the workflow; always equals the latest deployed RC tag | — |
+| `main` | production; changes arrive only through the `rc` → `main` PR | `prod` |
 
-`deploy` runs only if `ci` passes on the merged code.
-Set a branch protection rule on `main` that requires a pull request with at least one approval and blocks direct pushes.
-Then an approved merge is the only thing that can start the pipeline.
+### Release flow
 
-**Promotion to prod uses tags, not a second branch.** The commit tagged `v1.2.0` is the exact commit already built, tested and running in dev.
-Prod gets the same tested code, rebuilt from that commit, instead of a fresh merge that was never tested.
-Every release has a version to read, compare and roll back to (`git checkout v1.1.0`, re-run the deploy).
-There are no long-lived `dev`/`test` branches to keep in sync.
+```mermaid
+flowchart LR
+    F[feature branch] -- "PR approved + merged" --> D[dev]
+    D -- "CI → deploy DEV" --> DE[(dev env)]
+    D -- "git tag v1.2.0-rc1" --> T{{RC tag}}
+    T -- "CI → deploy RC" --> RE[(rc env)]
+    T -- "workflow moves rc branch<br/>+ opens PR rc → main" --> R[rc]
+    R -- "PR approved + merged" --> M[main]
+    M -- "CI → check main == RC → deploy PROD<br/>→ release v1.2.0" --> PE[(prod env)]
+```
 
-The **deploy** job:
+Nothing runs when a pull request is opened or updated. Every run starts after a merge or a tag:
+
+1. **Feature → `dev`.** Open a PR into `dev`. When it is approved and merged, CI runs (ruff, pytest with coverage, compile all pipelines), then the code deploys to **dev**.
+2. **`dev` → RC (tag).** When dev looks good, tag that commit and push the tag:
+   ```bash
+   git tag v1.2.0-rc1 origin/dev
+   ```
+   ```bash
+   git push origin v1.2.0-rc1
+   ```
+   CI runs and the tagged commit deploys to the **rc** environment. The workflow then force-moves the `rc` branch to the tag and opens (or updates) a PR titled `Release v1.2.0 (v1.2.0-rc1)` from `rc` into `main`.
+   If the RC has a problem, fix it on `dev` and tag `v1.2.0-rc2`. The same PR updates to the new RC.
+3. **RC → `main` (PR).** Review and approve the release PR, then merge it. CI runs, then the `plan` job checks that `main` now has exactly the same content as an RC tag. If it does, the code deploys to **prod** and the workflow publishes GitHub release `v1.2.0`.
+
+**Guards** (in the `plan` job):
+- An RC tag must match `vX.Y.Z-rcN` and point at a commit on `dev`.
+- A merge into `main` deploys only if its file tree is identical to an RC tag, so prod runs exactly what was tested in rc. Merge, squash and rebase merges all pass this check. A commit pushed straight to `main`, or a PR from any branch other than `rc`, fails it.
+- A version that has already been released can't be released again; cut a new RC with a higher version.
+- Manual runs (`workflow_dispatch`) let you redeploy any environment. A prod redeploy or rollback must start from `main` or a release tag. To roll back, run the workflow on tag `v1.1.0` with environment `prod`.
+
+**Hotfixes** follow the same path: PR into `dev`, tag `vX.Y.Z-rc1`, merge the release PR. There is no shortcut that skips rc.
+
+### What the deploy job does
 1. Authenticates to GCP with Workload Identity Federation (no service-account keys).
 2. Builds and pushes the component image, tagged `sha-<commit>`.
-3. Compiles the pipelines against that image and publishes the templates to the Artifact Registry KFP repo (tags `latest`, `sha-<commit>`, `<env>`).
+3. Compiles the pipelines against that image and publishes the templates to the Artifact Registry KFP repo, tagged `latest`, `sha-<commit>`, the version (`v1-2-0-rc1`) and the environment name.
 4. Submits a training run.
 5. Recreates the evaluation and batch-inference **schedules** so they point at the new template version.
 
-Required settings for each GitHub environment (`dev`, `prod`):
+### One-time GitHub setup
 
-| Name | Type | Example |
-|---|---|---|
-| `GCP_PROJECT_ID` | variable | `my-storm-dev` |
-| `WIF_PROVIDER` | secret | `projects/123/locations/global/workloadIdentityPools/github/providers/github-oidc` |
-| `DEPLOYER_SA` | secret | `github-deployer@my-storm-dev.iam.gserviceaccount.com` |
+1. **Create the branches.** Create `dev` from `main`. The workflow creates `rc` the first time an RC deploys.
+2. **Create three environments** (Settings → Environments): `dev`, `rc` and `prod`, one GCP project each, bootstrapped with `infra/setup_gcp.sh`. Set these values in each:
+
+   | Name | Type | Example |
+   |---|---|---|
+   | `GCP_PROJECT_ID` | variable | `my-storm-rc` |
+   | `WIF_PROVIDER` | secret | `projects/123/locations/global/workloadIdentityPools/github/providers/github-oidc` |
+   | `DEPLOYER_SA` | secret | `github-deployer@my-storm-rc.iam.gserviceaccount.com` |
+
+   Add required reviewers to `rc` and `prod` if you want a second approval before those deploys start.
+3. **Protect the branches** (Settings → Rules → Rulesets):
+   - `dev` and `main`: require a pull request with at least 1 approval, and block direct pushes and force pushes.
+   - `rc`: block direct pushes for everyone except the GitHub Actions bot, which force-moves it.
+4. **Let Actions open PRs:** Settings → Actions → General → Workflow permissions → tick "Allow GitHub Actions to create and approve pull requests".
+5. **Protect tags:** add a tag ruleset on `v*` so only maintainers can create release-candidate tags.
+
+### Why a tag for dev → rc, but a PR for rc → main
+- **dev → rc is a snapshot, so a tag fits.** It freezes an exact commit and gives it a version. No new merge commit is created, so rc runs exactly what was in dev, and every RC can be named, compared and redeployed later.
+- **rc → main is an approval, so a PR fits.** The PR records who approved the release and when, and it shows the full diff between prod and the release.
+- **The usual weakness of branch promotion is closed.** Normally, merging into `main` can bring in code that never ran in the earlier environment. Here the `plan` job blocks prod unless `main` equals a tested RC tag.
 
 ## 8. Design decisions
 

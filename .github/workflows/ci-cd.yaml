@@ -1,25 +1,32 @@
 # CI/CD for the storm forecasting Vertex AI pipelines.
 #
-#   Nothing runs when a PR is opened or updated. The flow starts once a PR is
-#   approved and merged into main (a merge is a push to main):
+# Release flow (nothing runs when a PR is opened; everything starts after a merge or a tag):
 #
-#   merge to main -> CI (lint, tests, compile) -> CD to DEV
-#                    (build/push image, publish pipeline templates, run training, refresh schedules)
-#   tag v*        -> CI -> same deployment into PROD (GitHub environment "prod" should require reviewers)
+#   feature branch --PR (approved + merged)--> dev    : CI -> deploy DEV
+#   commit on dev  --tag vX.Y.Z-rcN------------> rc     : CI -> deploy RC -> move `rc` branch to the tag
+#                                                         -> open/refresh the PR  rc -> main
+#   rc             --PR (approved + merged)--> main   : CI -> check main == latest RC -> deploy PROD
+#                                                         -> create GitHub release vX.Y.Z
 #
-#   Protect `main` (require a PR with an approving review, block direct pushes) so the
-#   only way code reaches main, and therefore triggers this workflow, is an approved merge.
+# Prod only ever runs code that was already deployed and tested as an RC: the `plan` job
+# fails if the merged tree on main differs from the tree of an RC tag.
 #
-# Auth uses Workload Identity Federation (no JSON keys). Per GitHub environment set:
-#   vars.GCP_PROJECT_ID, secrets.WIF_PROVIDER, secrets.DEPLOYER_SA   (see infra/setup_gcp.sh)
+# Auth uses Workload Identity Federation (no JSON keys). For each GitHub environment
+# (dev, rc, prod) set: vars.GCP_PROJECT_ID, secrets.WIF_PROVIDER, secrets.DEPLOYER_SA
+# (see infra/setup_gcp.sh and the README section "CI/CD").
 name: ci-cd
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches: [dev, main]
+    tags: ["v*-rc*"]
   workflow_dispatch:
     inputs:
+      environment:
+        description: "Environment to (re)deploy from the selected ref"
+        type: choice
+        options: [dev, rc, prod]
+        default: dev
       run_training:
         description: "Submit a training run after deploying"
         type: boolean
@@ -37,6 +44,78 @@ env:
   IMAGE_NAME: storm-pipeline
 
 jobs:
+  plan:
+    name: Plan release
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.plan.outputs.env }}
+      version: ${{ steps.plan.outputs.version }}
+      rc_tag: ${{ steps.plan.outputs.rc_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history + tags for the promotion checks
+
+      - id: plan
+        name: Decide target environment and run promotion guards
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          RC_RE='^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
+          REL_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          RC_TAG=""
+
+          # Newest RC tag whose content is identical to HEAD (works for merge, squash or rebase merges).
+          find_rc_for_head() {
+            local head_tree; head_tree=$(git rev-parse 'HEAD^{tree}')
+            for t in $(git tag -l 'v*-rc*' --sort=-creatordate); do
+              if [ "$(git rev-parse "${t}^{tree}")" = "$head_tree" ]; then echo "$t"; return 0; fi
+            done
+            return 1
+          }
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            ENV="$INPUT_ENV"; VERSION="$REF_NAME"
+            if [ "$ENV" = "rc" ] && ! [[ "$REF_NAME" =~ $RC_RE ]]; then
+              echo "::error::Manual RC deploys must be started from an RC tag (vX.Y.Z-rcN)"; exit 1
+            fi
+            if [ "$ENV" = "prod" ] && ! { [[ "$REF_NAME" =~ $REL_RE ]] || [ "$REF_NAME" = "main" ]; }; then
+              echo "::error::Manual prod deploys (incl. rollbacks) must use main or a release tag vX.Y.Z"; exit 1
+            fi
+          elif [ "$REF_TYPE" = "tag" ]; then
+            if ! [[ "$REF_NAME" =~ $RC_RE ]]; then
+              echo "::error::Tag $REF_NAME is not an RC tag (expected vX.Y.Z-rcN)"; exit 1
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/dev; then
+              echo "::error::RC tags must point at a commit on the dev branch"; exit 1
+            fi
+            ENV="rc"; VERSION="$REF_NAME"; RC_TAG="$REF_NAME"
+          elif [ "$REF_NAME" = "dev" ]; then
+            ENV="dev"; VERSION="dev-${GITHUB_SHA::7}"
+          elif [ "$REF_NAME" = "main" ]; then
+            if ! RC_TAG=$(find_rc_for_head); then
+              echo "::error::main does not match any RC tag. Only merge the rc branch into main;"
+              echo "::error::bring other changes in through dev and cut a new RC tag."
+              exit 1
+            fi
+            VERSION="${RC_TAG%-rc*}"
+            if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+              echo "::error::Release ${VERSION} already exists; cut a new RC with a higher version"; exit 1
+            fi
+            ENV="prod"
+          else
+            echo "::error::Unsupported ref $REF_NAME"; exit 1
+          fi
+
+          echo "env=$ENV" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "rc_tag=$RC_TAG" >> "$GITHUB_OUTPUT"
+          echo "### Plan: deploy \`$VERSION\` to **$ENV** ${RC_TAG:+(from \`$RC_TAG\`)}" >> "$GITHUB_STEP_SUMMARY"
+
   ci:
     name: Lint, test, compile
     runs-on: ubuntu-latest
@@ -69,15 +148,16 @@ jobs:
           path: build/*.yaml
 
   deploy:
-    name: Deploy (${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }})
-    needs: ci   # CD only runs if CI passed on the merged code
+    name: Deploy (${{ needs.plan.outputs.env }})
+    needs: [plan, ci]   # CD only runs if CI passed
     runs-on: ubuntu-latest
-    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }}
+    environment: ${{ needs.plan.outputs.env }}
     permissions:
       contents: read
       id-token: write
     env:
-      DEPLOY_ENV: ${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }}
+      DEPLOY_ENV: ${{ needs.plan.outputs.env }}
+      VERSION: ${{ needs.plan.outputs.version }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +167,8 @@ jobs:
         run: |
           TAG="sha-${GITHUB_SHA::12}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # template tags may not contain dots: v1.2.0-rc1 -> v1-2-0-rc1
+          echo "version_tag=${VERSION//./-}" >> "$GITHUB_OUTPUT"
           echo "image=${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_DOCKER_REPO}/${IMAGE_NAME}:${TAG}" >> "$GITHUB_OUTPUT"
           echo "kfp_host=https://${REGION}-kfp.pkg.dev/${GCP_PROJECT_ID}/${AR_KFP_REPO}" >> "$GITHUB_OUTPUT"
 
@@ -124,6 +206,7 @@ jobs:
             --output-dir build \
             --registry-host "${{ steps.vars.outputs.kfp_host }}" \
             --tag "${{ steps.vars.outputs.tag }}" \
+            --tag "${{ steps.vars.outputs.version_tag }}" \
             --tag "${DEPLOY_ENV}"
 
       - name: Submit training pipeline
@@ -154,7 +237,64 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### Deployed to ${DEPLOY_ENV}"
+            echo "### Deployed ${VERSION} to ${DEPLOY_ENV}"
             echo "- Image: \`${{ steps.vars.outputs.image }}\`"
             echo "- Templates: \`${{ steps.vars.outputs.kfp_host }}\` tag \`${{ steps.vars.outputs.tag }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  promote-rc:
+    name: Move rc branch + open PR to main
+    needs: [plan, deploy]
+    if: needs.plan.outputs.env == 'rc' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RC_TAG: ${{ needs.plan.outputs.rc_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Point the rc branch at the RC tag
+        # rc always mirrors the latest successfully deployed RC tag
+        run: git push --force origin "${GITHUB_SHA}:refs/heads/rc"
+
+      - name: Open or update the release PR rc -> main
+        run: |
+          set -euo pipefail
+          VERSION="${RC_TAG%-rc*}"
+          BODY=$(printf '%s\n' \
+            "Promote **${RC_TAG}** to production as **${VERSION}**." \
+            "" \
+            "- RC deployed and tested in the \`rc\` environment: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            "- Approving and merging this PR runs CI, then deploys ${VERSION} to prod and creates the release." \
+            "- Do not push other commits to this PR; fix issues on dev and cut a new RC tag.")
+          PR=$(gh pr list --base main --head rc --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            gh pr create --base main --head rc --title "Release ${VERSION} (${RC_TAG})" --body "$BODY"
+          else
+            gh pr edit "$PR" --title "Release ${VERSION} (${RC_TAG})" --body "$BODY"
+          fi
+
+  release:
+    name: Create GitHub release
+    needs: [plan, deploy]
+    if: needs.plan.outputs.env == 'prod' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      RC_TAG: ${{ needs.plan.outputs.rc_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag and publish release
+        run: |
+          gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" \
+            --notes "Promoted from ${RC_TAG}. Deployed to prod by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --generate-notes
