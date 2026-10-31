@@ -1,0 +1,46 @@
+env: dev
+project_id: ${GCP_PROJECT_ID}    # export GCP_PROJECT_ID=... (set per environment in CI)
+region: us-central1
+timezone: UTC
+pipeline_root: gs://${GCP_PROJECT_ID}-storm-ml/pipeline_root
+staging_bucket: gs://${GCP_PROJECT_ID}-storm-ml/staging
+service_account: vertex-pipelines@${GCP_PROJECT_ID}.iam.gserviceaccount.com
+
+bigquery:
+  location: US                 # must match the public NOAA dataset (US multi-region)
+  dataset: storm_ml
+  raw_table: storm_events_raw
+  features_table: storm_features_weekly
+  leaderboard_table: model_leaderboard
+  monitoring_table: model_monitoring
+  predictions_table: storm_predictions
+
+data:
+  start_year: 2010             # smaller window in dev = cheaper/faster
+  end_year: 2024
+  refresh_raw_data: true
+  val_weeks: 52
+  test_weeks: 52
+
+model:
+  display_name: storm-weekly-event-forecaster
+  # Registry entry is used for versioning + aliases; batch scoring loads the
+  # artifact directly. Set a serving image if you also deploy to an endpoint.
+  serving_container_image_uri: ""
+
+training:
+  min_improvement_pct: 2.0     # challenger must beat best linear baseline by >= 2% test RMSE
+  hyperparameters:
+    linear_regression: {}
+    ridge: {alpha: 10.0}
+    random_forest: {n_estimators: 200, max_depth: 12, min_samples_leaf: 5, max_features: 0.5, n_jobs: -1, random_state: 42}
+    xgboost: {n_estimators: 400, learning_rate: 0.05, max_depth: 6, subsample: 0.8, colsample_bytree: 0.8, min_child_weight: 5, tree_method: hist, n_jobs: -1, random_state: 42}
+
+evaluation:
+  lookback_weeks: 26
+  max_rmse_degradation_pct: 15.0
+  auto_retrain: false
+
+schedules:
+  evaluation: "0 5 * * 1"      # Mondays 05:00
+  batch_inference: "0 6 * * 1" # Mondays 06:00

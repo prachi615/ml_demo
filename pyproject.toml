@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "storm-prediction"
+version = "0.1.0"
+description = "Weekly storm event forecasting with Vertex AI Pipelines and BigQuery"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+storm_prediction = ["sql/*.sql"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+# KFP components use functional NamedTuple outputs (UP014); B008 flags json.dumps defaults.
+ignore = ["B008", "UP006", "UP014", "UP035"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
