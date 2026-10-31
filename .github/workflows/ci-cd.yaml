@@ -1,16 +1,20 @@
 # CI/CD for the storm forecasting Vertex AI pipelines.
 #
-#   pull_request -> lint + unit tests + compile pipelines
-#   push to main -> CI + build/push image + publish pipeline templates + run training + refresh schedules in DEV
-#   tag v*       -> CI + same deployment into PROD (GitHub environment "prod" should require reviewers)
+#   Nothing runs when a PR is opened or updated. The flow starts once a PR is
+#   approved and merged into main (a merge is a push to main):
+#
+#   merge to main -> CI (lint, tests, compile) -> CD to DEV
+#                    (build/push image, publish pipeline templates, run training, refresh schedules)
+#   tag v*        -> CI -> same deployment into PROD (GitHub environment "prod" should require reviewers)
+#
+#   Protect `main` (require a PR with an approving review, block direct pushes) so the
+#   only way code reaches main, and therefore triggers this workflow, is an approved merge.
 #
 # Auth uses Workload Identity Federation (no JSON keys). Per GitHub environment set:
 #   vars.GCP_PROJECT_ID, secrets.WIF_PROVIDER, secrets.DEPLOYER_SA   (see infra/setup_gcp.sh)
 name: ci-cd
 
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: [main]
     tags: ["v*"]
@@ -23,7 +27,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false   # never cancel a deployment half-way
 
 env:
   PYTHON_VERSION: "3.12"
@@ -66,8 +70,7 @@ jobs:
 
   deploy:
     name: Deploy (${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }})
-    needs: ci
-    if: github.event_name != 'pull_request'
+    needs: ci   # CD only runs if CI passed on the merged code
     runs-on: ubuntu-latest
     environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'prod' || 'dev' }}
     permissions:

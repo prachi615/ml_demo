@@ -230,11 +230,22 @@ ORDER BY predicted_event_count DESC;
 
 ## 7. CI/CD (`.github/workflows/ci-cd.yaml`)
 
+Nothing runs when a pull request is opened or updated. The workflow starts only after a PR is approved and merged.
+
 | Trigger | Jobs |
 |---|---|
-| Pull request → `main` | **ci**: ruff lint, pytest (with coverage), compile all pipelines, upload compiled YAML as an artifact |
-| Push → `main` | **ci** → **deploy (dev)** |
-| Tag `v*` | **ci** → **deploy (prod)**; protect the `prod` GitHub environment with required reviewers |
+| PR approved and merged into `main` | **ci** (ruff lint, pytest with coverage, compile all pipelines) → **deploy (dev)** |
+| Tag `v*` on `main` | **ci** → **deploy (prod)**; protect the `prod` GitHub environment with required reviewers |
+| Manual (`workflow_dispatch`) | **ci** → **deploy**, with an option to skip the training run |
+
+`deploy` runs only if `ci` passes on the merged code.
+Set a branch protection rule on `main` that requires a pull request with at least one approval and blocks direct pushes.
+Then an approved merge is the only thing that can start the pipeline.
+
+**Promotion to prod uses tags, not a second branch.** The commit tagged `v1.2.0` is the exact commit already built, tested and running in dev.
+Prod gets the same tested code, rebuilt from that commit, instead of a fresh merge that was never tested.
+Every release has a version to read, compare and roll back to (`git checkout v1.1.0`, re-run the deploy).
+There are no long-lived `dev`/`test` branches to keep in sync.
 
 The **deploy** job:
 1. Authenticates to GCP with Workload Identity Federation (no service-account keys).
