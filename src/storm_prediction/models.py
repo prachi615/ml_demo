@@ -10,7 +10,8 @@
 Every model is wrapped in the same scikit-learn pipeline (imputation, optional
 scaling, one-hot encoding of ``state``) and trained on ``log1p(event_count)``,
 so the comparison between the four is like-for-like. Every training run picks the
-best of the four for the current data; any of them can win. The fitted
+best of the four for the current data, which must then beat LinearRegression by
+more than 2% to be promoted (see components/training.py). The fitted
 object is a single estimator that can be saved with ``joblib`` and used for
 batch inference without extra preprocessing code.
 """

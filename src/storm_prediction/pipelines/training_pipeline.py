@@ -5,11 +5,12 @@ Training stage:
     -> train the 4 models in parallel (linear regression, ridge, random forest, XGBoost)
     -> score each on the test split
     -> pick the best of the 4 for this dataset (lowest validation RMSE)
+    -> baseline gate: it must beat linear regression by more than 2% (test RMSE)
     -> write the leaderboard to BigQuery
 
 Evaluation stage (only after training has finished):
     -> score the current champion on the SAME test split
-    -> promote the new best model only if it beats the champion
+    -> promote the new best model only if it passed the baseline gate AND beats the champion
     -> log the decision to BigQuery
     -> if promoted: register it in the Vertex AI Model Registry as the new champion
 """
@@ -39,7 +40,10 @@ PIPELINE_NAME = "storm-forecast-training"
 
 @dsl.pipeline(
     name=PIPELINE_NAME,
-    description="Monthly retraining: find the best of 4 models, promote it if it beats the champion.",
+    description=(
+        "Monthly retraining: best of 4 models must beat linear regression by >2% "
+        "and the current champion to be promoted."
+    ),
 )
 def training_pipeline(
     project: str,
@@ -56,11 +60,12 @@ def training_pipeline(
     val_weeks: int = 52,
     test_weeks: int = 52,
     hyperparameters_json: str = json.dumps(DEFAULT_HYPERPARAMETERS),
-    min_improvement_pct: float = 0.0,
+    min_improvement_over_baseline_pct: float = 2.0,
+    min_improvement_over_champion_pct: float = 0.0,
     model_display_name: str = "storm-weekly-event-forecaster",
     serving_container_image_uri: str = PIPELINE_IMAGE,
 ):
-    """Retrain the four models, evaluate the best one against the champion, promote if better.
+    """Retrain the four models; promote the best if it beats linear regression and the champion.
 
     Args:
         project: GCP project for BigQuery, Vertex AI and the registry.
@@ -77,7 +82,10 @@ def training_pipeline(
         val_weeks: Weeks in the validation split (used to pick the best model).
         test_weeks: Weeks in the test split (used to compare with the champion).
         hyperparameters_json: Per-model hyperparameters as JSON (see models.py).
-        min_improvement_pct: Required test-RMSE improvement over the champion, in percent.
+        min_improvement_over_baseline_pct: The best model must beat linear regression's
+            test RMSE by MORE than this many percent.
+        min_improvement_over_champion_pct: Required test-RMSE improvement over the
+            current champion, in percent (0 = any improvement).
         model_display_name: Model Registry entry name.
         serving_container_image_uri: Image recorded with the registered model.
     """
@@ -139,7 +147,8 @@ def training_pipeline(
         ).set_display_name(f"test-{model_type}")
         trained[model_type], evaluated[model_type] = train_task, eval_task
 
-    # 5. Pick the best of the four for this dataset (lowest validation RMSE).
+    # 5. Pick the best of the four for this dataset (lowest validation RMSE) and
+    #    check it beats the linear regression baseline by more than the margin.
     select = select_best_model(
         linear_regression_model=trained["linear_regression"].outputs["model"],
         ridge_model=trained["ridge"].outputs["model"],
@@ -153,6 +162,7 @@ def training_pipeline(
         ridge_test=evaluated["ridge"].outputs["metrics_json"],
         random_forest_test=evaluated["random_forest"].outputs["metrics_json"],
         xgboost_test=evaluated["xgboost"].outputs["metrics_json"],
+        min_improvement_over_baseline_pct=min_improvement_over_baseline_pct,
     ).set_display_name("select-best-of-4")
 
     # 6. Keep a history of every run's leaderboard in BigQuery.
@@ -181,7 +191,8 @@ def training_pipeline(
     )
     champion.set_caching_options(False)  # the champion can change between runs
 
-    # 8. Compare new best vs champion and log the decision to BigQuery.
+    # 8. Promote only if the baseline gate passed AND the new model beats the
+    #    champion; log the decision to BigQuery.
     decision = decide_promotion(
         project=project,
         bq_location=bq_location,
@@ -189,16 +200,20 @@ def training_pipeline(
         pipeline_job_name=dsl.PIPELINE_JOB_NAME_PLACEHOLDER,
         new_model_type=select.outputs["best_model_type"],
         new_test_metrics_json=select.outputs["best_test_metrics_json"],
+        beats_baseline=select.outputs["beats_baseline"],
+        baseline_test_rmse=select.outputs["baseline_test_rmse"],
+        improvement_over_baseline_pct=select.outputs["improvement_over_baseline_pct"],
+        min_improvement_over_baseline_pct=min_improvement_over_baseline_pct,
         champion_status=champion.outputs["champion_status"],
         champion_version=champion.outputs["champion_version"],
         champion_model_type=champion.outputs["champion_model_type"],
         champion_test_rmse=champion.outputs["champion_test_rmse"],
-        min_improvement_pct=min_improvement_pct,
+        min_improvement_over_champion_pct=min_improvement_over_champion_pct,
         test_end=splits.outputs["test_end"],
     ).set_display_name("decide-promotion")
     decision.set_caching_options(False)
 
-    # 9. Register the new model as champion only if it won.
+    # 9. Register the new model as champion only if it passed both checks.
     with dsl.If(decision.outputs["promote"] == True, name="new-model-is-better"):  # noqa: E712
         register_model(
             project=project,

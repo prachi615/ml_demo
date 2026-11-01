@@ -11,17 +11,19 @@ Runs on the 1st of every month (04:00 UTC) and once on every deploy. It has two 
 ```
 ingest → build features → time split ─┬─ train linear_regression → score on test ─┐
                                       ├─ train ridge             → score on test ─┤
-                                      ├─ train random_forest     → score on test ─┼→ best of 4 ─→ write leaderboard (BigQuery)
+                                      ├─ train random_forest     → score on test ─┼→ best of 4 → baseline gate ─→ write leaderboard (BigQuery)
                                       └─ train xgboost           → score on test ─┘
 ```
-The four branches run in parallel. The best of the four is the model with the lowest validation RMSE; any of them can win.
+The four branches run in parallel. The best of the four is the model with the lowest validation RMSE.
+**Baseline gate:** its test RMSE must beat the Linear Regression baseline by more than 2% (`min_improvement_over_baseline_pct`). If Linear Regression itself wins, the gate fails.
 
 **Evaluation stage**
 ```
-best of 4 ─→ evaluate current champion on the same test weeks ─→ decide promotion ─→ [new model better?] register as champion
+best of 4 ─→ evaluate current champion on the same test weeks ─→ decide promotion ─→ [gate passed AND beats champion?] register as champion
                                                                        └─→ model_evaluations (BigQuery)
 ```
-The new model replaces the champion only if its test RMSE is lower, by at least `min_improvement_pct` (default 0). On the very first run there is no champion, so the new model is promoted.
+The new model replaces the champion only if it passed the baseline gate **and** its test RMSE is lower than the champion's, by at least `min_improvement_over_champion_pct` (default 0).
+On the very first run there is no champion, so passing the baseline gate is enough. A model that fails the gate is never promoted.
 
 ## `batch_inference_pipeline.py` (`storm-forecast-batch-inference`)
 

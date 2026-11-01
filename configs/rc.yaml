@@ -29,9 +29,12 @@ model:
   serving_container_image_uri: ""
 
 training:
-  # The best of the 4 models replaces the champion only if its test RMSE is lower
-  # by at least this many percent (both scored on the same test weeks). 0 = any improvement.
-  min_improvement_pct: 0.0
+  # Every monthly run, the best of the 4 models is promoted only if BOTH hold
+  # (test RMSE, all models scored on the same test weeks):
+  # 1. it beats the linear regression baseline by MORE than this many percent
+  min_improvement_over_baseline_pct: 2.0
+  # 2. it beats the current champion by at least this many percent (0 = any improvement)
+  min_improvement_over_champion_pct: 0.0
   hyperparameters:
     linear_regression: {}
     ridge: {alpha: 10.0}

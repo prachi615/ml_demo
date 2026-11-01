@@ -1,5 +1,12 @@
 """Evaluation components: run after training to decide whether to promote the new model.
 
+A new model is promoted only if BOTH checks pass:
+
+1. Baseline gate: it beats the linear regression baseline by more than
+   ``min_improvement_over_baseline_pct`` (checked in ``select_best_model``).
+2. Champion check: it beats the current champion by at least
+   ``min_improvement_over_champion_pct``.
+
 The newly trained best model and the current champion are scored on the SAME
 test weeks (the newest labelled data), so the comparison is fair. The champion
 was trained on data that ends before these weeks, so it has not seen them either.
@@ -121,15 +128,22 @@ def decide_promotion(
     pipeline_job_name: str,
     new_model_type: str,
     new_test_metrics_json: str,
+    beats_baseline: bool,
+    baseline_test_rmse: float,
+    improvement_over_baseline_pct: float,
+    min_improvement_over_baseline_pct: float,
     champion_status: str,
     champion_version: str,
     champion_model_type: str,
     champion_test_rmse: float,
-    min_improvement_pct: float,
+    min_improvement_over_champion_pct: float,
     test_end: str,
     report: Output[Markdown],
 ) -> NamedTuple("Outputs", [("promote", bool), ("reason", str)]):
-    """Compare the new best model with the champion and log the decision to BigQuery.
+    """Decide whether the new best model becomes champion, and log the decision to BigQuery.
+
+    Promote only if the model passed the linear regression baseline gate AND
+    beats the current champion on the same test weeks.
 
     Args:
         project: GCP project used to write the evaluation row.
@@ -138,11 +152,16 @@ def decide_promotion(
         pipeline_job_name: Name of the current pipeline run.
         new_model_type: Type of the best of the four newly trained models.
         new_test_metrics_json: Its test metrics as JSON.
+        beats_baseline: Result of the baseline gate from ``select_best_model``.
+        baseline_test_rmse: Linear regression test RMSE.
+        improvement_over_baseline_pct: New model's improvement over it, in percent.
+        min_improvement_over_baseline_pct: Margin the baseline gate required.
         champion_status: ``ok``, ``none`` or ``incompatible`` (from ``evaluate_champion``).
         champion_version: Champion version name (empty if none).
         champion_model_type: Champion model type (empty if none).
         champion_test_rmse: Champion RMSE on the same test split.
-        min_improvement_pct: Required RMSE improvement over the champion, in percent.
+        min_improvement_over_champion_pct: Required RMSE improvement over the
+            champion, in percent.
         test_end: Last week of the test split, for the record.
         report: Output Markdown summary shown in the Vertex AI UI.
 
@@ -161,7 +180,18 @@ def decide_promotion(
 
     new = json.loads(new_test_metrics_json)
     champion_rmse = champion_test_rmse if champion_status == "ok" else None
-    promote, reason = should_promote(new["rmse"], champion_rmse, min_improvement_pct)
+
+    # Check 1: the baseline gate. A model that fails it is never promoted,
+    # even on the first run when there is no champion.
+    if not beats_baseline:
+        promote = False
+        reason = (
+            f"failed baseline gate: {improvement_over_baseline_pct:.2f}% better than linear "
+            f"regression, needs > {min_improvement_over_baseline_pct:.2f}%"
+        )
+    else:
+        # Check 2: beat the current champion on the same test weeks.
+        promote, reason = should_promote(new["rmse"], champion_rmse, min_improvement_over_champion_pct)
 
     # One row per training run: the history of every promotion decision.
     row = pd.DataFrame(
@@ -175,11 +205,15 @@ def decide_promotion(
                 "new_test_mae": new["mae"],
                 "new_test_r2": new["r2"],
                 "new_test_wape": new["wape"],
+                "baseline_test_rmse": baseline_test_rmse,
+                "improvement_over_baseline_pct": improvement_over_baseline_pct,
+                "min_improvement_over_baseline_pct": min_improvement_over_baseline_pct,
+                "beats_baseline": beats_baseline,
                 "champion_status": champion_status,
                 "champion_version": champion_version,
                 "champion_model_type": champion_model_type,
                 "champion_test_rmse": champion_rmse,
-                "min_improvement_pct": min_improvement_pct,
+                "min_improvement_over_champion_pct": min_improvement_over_champion_pct,
                 "promoted": promote,
                 "reason": reason,
             }
@@ -195,6 +229,12 @@ def decide_promotion(
     with open(report.path, "w", encoding="utf-8") as fh:
         fh.write("# Promotion decision\n\n")
         fh.write(f"- New best model: `{new_model_type}`, test RMSE {new['rmse']:.4f}\n")
+        fh.write(
+            f"- Baseline gate: linear regression test RMSE {baseline_test_rmse:.4f}, "
+            f"improvement {improvement_over_baseline_pct:.2f}% "
+            f"(needs > {min_improvement_over_baseline_pct:.2f}%): "
+            f"**{'passed' if beats_baseline else 'failed'}**\n"
+        )
         fh.write(f"- Current champion: {champion_text}\n")
         fh.write(f"- **Promote: {promote}** ({reason})\n")
 

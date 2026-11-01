@@ -9,9 +9,9 @@ make test
 | File | Checks |
 |---|---|
 | `conftest.py` | fixture: a synthetic feature table with the same schema as BigQuery |
-| `test_models.py` | the four models train and predict non-negative counts; unseen states work; metrics and the promotion rule are correct |
+| `test_models.py` | the four models train and predict non-negative counts; unseen states work; metrics, the > 2% Linear Regression gate and the champion rule are correct |
 | `test_data.py` | time splits are chronological and don't overlap; risk labels; SQL templates render completely and contain no same-week leakage |
-| `test_pipelines.py` | both pipelines compile; training has four training branches; evaluation runs after training and gates registration |
+| `test_pipelines.py` | both pipelines compile; training has four training branches; evaluation runs after training and gates registration; the baseline gate feeds the decision |
 
 ## Not covered
 

@@ -21,7 +21,7 @@ Loading fails with a clear error if a placeholder can't be resolved.
 | `bigquery.*` | dataset (must be in `US`) and table names |
 | `data.*` | years to load (`end_year: 0` = current year), validation/test split sizes |
 | `model.*` | Model Registry name, optional serving image |
-| `training.*` | promotion margin over the champion (`min_improvement_pct`) and per-model hyperparameters |
+| `training.*` | the two promotion margins and per-model hyperparameters: `min_improvement_over_baseline_pct` (beat Linear Regression by more than this, default 2) and `min_improvement_over_champion_pct` (beat the current champion by at least this, default 0) |
 | `schedules.*` | cron expressions (UTC): `training` = monthly retraining, `batch_inference` = weekly forecast |
 
 To change a model's hyperparameters, edit `training.hyperparameters.<model>`. No code change is needed.

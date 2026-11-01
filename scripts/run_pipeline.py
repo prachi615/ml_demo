@@ -75,7 +75,8 @@ def training_params(cfg: dict[str, Any]) -> dict[str, Any]:
         "evaluation_table": cfg["bigquery"]["evaluation_table"],
         "val_weeks": cfg["data"]["val_weeks"],
         "test_weeks": cfg["data"]["test_weeks"],
-        "min_improvement_pct": tr["min_improvement_pct"],
+        "min_improvement_over_baseline_pct": tr["min_improvement_over_baseline_pct"],
+        "min_improvement_over_champion_pct": tr["min_improvement_over_champion_pct"],
         "hyperparameters_json": json.dumps(tr["hyperparameters"]),
     }
     if cfg["model"].get("serving_container_image_uri"):

@@ -86,3 +86,25 @@ def should_promote(
     if new_rmse < champion_rmse and gain >= min_improvement_pct:
         return True, f"new model is {gain:.2f}% better than the champion"
     return False, f"new model is not better enough ({gain:.2f}% vs required {min_improvement_pct:.2f}%)"
+
+
+def beats_baseline(
+    candidate_rmse: float, baseline_rmse: float, min_improvement_pct: float = 2.0
+) -> tuple[bool, str]:
+    """Check that a model beats the linear regression baseline by MORE than a margin.
+
+    Both RMSEs must come from the same test weeks.
+
+    Args:
+        candidate_rmse: Test RMSE of the best of the four models.
+        baseline_rmse: Test RMSE of the linear regression baseline.
+        min_improvement_pct: Margin in percent; the improvement must be strictly greater.
+
+    Returns:
+        A tuple ``(passed, reason)``. If the best model *is* linear regression,
+        the improvement is 0% and the check fails.
+    """
+    gain = improvement_pct(candidate_rmse, baseline_rmse)
+    if gain > min_improvement_pct:
+        return True, f"beats linear regression by {gain:.2f}% (> {min_improvement_pct:.2f}%)"
+    return False, f"beats linear regression by only {gain:.2f}% (needs > {min_improvement_pct:.2f}%)"

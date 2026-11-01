@@ -43,3 +43,20 @@ def test_evaluation_runs_after_training_and_gates_registration(tmp_path):
     assert "register-model" not in tasks
     condition = next(t for name, t in tasks.items() if name.startswith("condition"))
     assert "decide-promotion" in condition["dependentTasks"]
+
+
+def test_baseline_gate_feeds_the_promotion_decision(tmp_path):
+    """The linear regression gate (default 2%) is wired from model selection into the decision."""
+    func, file_name = PIPELINES["training"]
+    path = tmp_path / file_name
+    compiler.Compiler().compile(pipeline_func=func, package_path=str(path))
+    spec = yaml.safe_load(path.read_text())
+
+    params = spec["root"]["inputDefinitions"]["parameters"]
+    assert params["min_improvement_over_baseline_pct"]["defaultValue"] == 2.0
+
+    decision_inputs = spec["root"]["dag"]["tasks"]["decide-promotion"]["inputs"]["parameters"]
+    assert decision_inputs["beats_baseline"]["taskOutputParameter"] == {
+        "outputParameterKey": "beats_baseline",
+        "producerTask": "select-best-model",
+    }

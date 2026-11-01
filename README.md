@@ -33,8 +33,9 @@ flowchart LR
         T1[ingest] --> T2[build features] --> T3[time split]
         T3 --> LR[Linear Reg] & RI[Ridge] & RF[Random Forest] & XG[XGBoost]
         LR & RI & RF & XG --> EV[score on test] --> SEL[best of 4]
-        SEL --> CH[evaluate champion<br/>on same test weeks]
-        CH --> DEC{new model<br/>better?} -->|yes| MR[Model Registry<br/>@champion]
+        SEL --> GATE{beats linear<br/>regression by &gt;2%?}
+        GATE --> CH[evaluate champion<br/>on same test weeks]
+        CH --> DEC{passed gate AND<br/>beats champion?} -->|yes| MR[Model Registry<br/>@champion]
     end
 
     subgraph IP[Batch inference pipeline - weekly]
@@ -90,12 +91,14 @@ All are fit on `log1p(count)` through `TransformedTargetRegressor`, so the compa
 | 3 | `RandomForestRegressor` | non-linear | non-linear and interaction effects |
 | 4 | `XGBRegressor` | non-linear | gradient-boosted trees (`hist`) |
 
-**Selection rule:** every training run trains all four models and picks **the best of the four for this dataset**, meaning the lowest validation RMSE.
-Any of the four can win, including a linear baseline.
-The baselines stay in the line-up as a reference point in the leaderboard.
+Every monthly training run applies three rules:
 
-**Promotion rule:** the winner is then scored on the test weeks, and so is the current champion.
-The winner replaces the champion only if its test RMSE is lower, by at least `min_improvement_pct` percent (default `0`, meaning any improvement).
+1. **Selection:** train all four models and pick **the best of the four**, meaning the lowest validation RMSE.
+2. **Baseline gate:** the winner's test RMSE must beat the **Linear Regression** baseline's test RMSE by **more than 2%** (`min_improvement_over_baseline_pct`).
+   If Linear Regression itself wins, the improvement is 0% and the gate fails.
+3. **Champion check:** the winner must also beat the current champion on the same test weeks, by at least `min_improvement_over_champion_pct` (default `0`, meaning any improvement).
+
+A model is registered as the new champion only if it passes **both** 2 and 3. Otherwise nothing is registered and the current champion stays live.
 
 Metrics logged per model: RMSE, MAE, R², WAPE, Poisson deviance, bias.
 
@@ -109,11 +112,13 @@ Metrics logged per model: RMSE, MAE, R², WAPE, Poisson deviance, bias.
 There is no separate evaluation pipeline and no weekly evaluation. Evaluation runs only as the last stage of a training run.
 There is also no automatic retraining trigger: retraining happens on the monthly schedule (and on deploy), whatever the current model's performance.
 
-**Training stage:** `ingest → build features → time split → 4× (train → score on test) in parallel → best of 4 (validation RMSE) → write leaderboard`.
+**Training stage:** `ingest → build features → time split → 4× (train → score on test) in parallel → best of 4 (validation RMSE) → baseline gate (beat Linear Regression by > 2%) → write leaderboard`.
 
 **Evaluation stage (starts after training finishes):**
 1. Load the current `champion` from the Model Registry and score it on **the same test weeks** as the new model. Both models are scored on data neither was trained on, so the comparison is fair.
-2. Decide: promote if the new model's test RMSE is lower (by `min_improvement_pct`). The first run (no champion yet), or a champion that can't score the current features, always promotes.
+2. Decide: promote only if the new model **passed the baseline gate** and its test RMSE is lower than the champion's (by `min_improvement_over_champion_pct`).
+   If there is no champion yet (first run), or the champion can't score the current features, passing the baseline gate is enough.
+   A model that fails the baseline gate is never promoted, not even on the first run.
 3. Log the decision to BigQuery (`model_evaluations`) and as a Markdown report in the Vertex AI UI.
 4. If promoted, register the new model as a new version and move the `champion` alias to it. Otherwise nothing is registered and the old champion stays live.
 
@@ -308,7 +313,8 @@ Nothing runs when a pull request is opened or updated. Every run starts after a 
 - **Features are computed in BigQuery.** Window functions over about 1,300 weeks × 51 states are cheap there, and the SQL is the single source of truth for training and inference, so the two cannot skew apart.
 - **Leakage control.** Every window ends at `1 PRECEDING`, the splits are chronological, and a unit test fails if `CURRENT ROW` ever appears in a window.
 - **Log-target for every model.** Event counts are heavy-tailed, and fitting `log1p(y)` stops linear models from being dominated by a few extreme weeks. Predictions are clipped at 0.
-- **Best of four, every month.** Each retraining run re-runs the whole model comparison on the latest data, so the chosen model type can change over time, for example from XGBoost to Ridge.
+- **Best of four, every month.** Each retraining run re-runs the whole model comparison on the latest data, so the chosen model type can change over time.
+- **The linear baseline as a gate.** The extra complexity of Ridge, Random Forest or XGBoost must earn its place: a model that doesn't beat plain Linear Regression by more than 2% is not shipped.
 - **Like-for-like promotion.** The new model and the champion are compared on identical test weeks, never against an RMSE recorded months earlier on different data.
 - **Champion alias in the registry.** Batch inference always resolves `model@champion`, so promotion and rollback are a single alias move with no redeploy.
 - **Simple schedule instead of triggers.** Retraining is a fixed monthly schedule, not a drift trigger. That is predictable in cost and easy to reason about, and NOAA data only arrives in monthly batches anyway.

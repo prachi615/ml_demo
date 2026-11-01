@@ -150,6 +150,7 @@ def select_best_model(
     ridge_test: str,
     random_forest_test: str,
     xgboost_test: str,
+    min_improvement_over_baseline_pct: float,
     best_model: Output[Model],
     leaderboard: Output[Dataset],
     report: Output[Markdown],
@@ -159,13 +160,18 @@ def select_best_model(
         ("best_model_type", str),
         ("best_test_rmse", float),
         ("best_test_metrics_json", str),
+        ("baseline_test_rmse", float),
+        ("improvement_over_baseline_pct", float),
+        ("beats_baseline", bool),
     ],
 ):
-    """Pick the best of the four models for this dataset.
+    """Pick the best of the four models and check it against the linear regression baseline.
 
-    The winner is the model with the lowest validation RMSE, whichever type it is
-    (a linear baseline can win). Its test RMSE, on weeks that played no part in
-    the choice, is what the evaluation stage compares with the champion.
+    The winner is the model with the lowest validation RMSE. Its test RMSE, on
+    weeks that played no part in the choice, must then be lower than the linear
+    regression baseline's test RMSE by MORE than ``min_improvement_over_baseline_pct``
+    percent. If linear regression itself wins, the gate fails (0% improvement).
+    The evaluation stage only promotes a model that passes this gate.
 
     Args:
         linear_regression_model: Trained linear regression model.
@@ -180,6 +186,8 @@ def select_best_model(
         ridge_test: Test metrics JSON of the ridge model.
         random_forest_test: Test metrics JSON of the random forest model.
         xgboost_test: Test metrics JSON of the XGBoost model.
+        min_improvement_over_baseline_pct: Required test-RMSE improvement over
+            linear regression, in percent (strictly greater than).
         best_model: Output; a copy of the winning model directory.
         leaderboard: Output parquet with one row per model, ranked.
         report: Output Markdown leaderboard shown in the Vertex AI UI.
@@ -188,6 +196,9 @@ def select_best_model(
         best_model_type: Name of the winning model type.
         best_test_rmse: Test RMSE of the winner.
         best_test_metrics_json: All test metrics of the winner as JSON.
+        baseline_test_rmse: Test RMSE of the linear regression baseline.
+        improvement_over_baseline_pct: Winner's test-RMSE improvement over it, in percent.
+        beats_baseline: True if that improvement is above the required margin.
     """
     import json
     import shutil
@@ -195,7 +206,9 @@ def select_best_model(
 
     import pandas as pd
 
-    from storm_prediction.models import BASELINE_MODEL_TYPES
+    from storm_prediction.metrics import beats_baseline as check_baseline
+    from storm_prediction.metrics import improvement_pct
+    from storm_prediction.models import BASELINE_MODEL_TYPES, LINEAR_REGRESSION
 
     # model type -> (model artifact, validation metrics JSON, test metrics JSON)
     candidates = {
@@ -225,6 +238,13 @@ def select_best_model(
     best_name = str(best["model_type"])
     best_test_json = candidates[best_name][2]
 
+    # Baseline gate: the winner must beat linear regression on the test weeks.
+    baseline_rmse = float(board.loc[board["model_type"] == LINEAR_REGRESSION, "test_rmse"].iloc[0])
+    passed, gate_reason = check_baseline(
+        float(best["test_rmse"]), baseline_rmse, min_improvement_over_baseline_pct
+    )
+    improvement = improvement_pct(float(best["test_rmse"]), baseline_rmse)
+
     # Copy the winner into this component's output so later steps get a single model.
     shutil.copytree(candidates[best_name][0].path, best_model.path, dirs_exist_ok=True)
     best_model.metadata.update(
@@ -232,6 +252,8 @@ def select_best_model(
             "model_type": best_name,
             "test_rmse": float(best["test_rmse"]),
             "val_rmse": float(best["val_rmse"]),
+            "improvement_over_linear_regression_pct": improvement,
+            "beats_baseline": passed,
         }
     )
 
@@ -246,7 +268,9 @@ def select_best_model(
         fh.write(board[cols].to_markdown(index=False, floatfmt=".4f"))
         fh.write(
             f"\n\n**Best model for this dataset:** `{best_name}` "
-            f"(validation RMSE {best['val_rmse']:.4f}, test RMSE {best['test_rmse']:.4f})\n"
+            f"(validation RMSE {best['val_rmse']:.4f}, test RMSE {best['test_rmse']:.4f})\n\n"
+            f"**Baseline gate (linear regression test RMSE {baseline_rmse:.4f}):** "
+            f"{'passed' if passed else 'FAILED'}, {gate_reason}\n"
         )
 
     outputs = NamedTuple(
@@ -255,9 +279,12 @@ def select_best_model(
             ("best_model_type", str),
             ("best_test_rmse", float),
             ("best_test_metrics_json", str),
+            ("baseline_test_rmse", float),
+            ("improvement_over_baseline_pct", float),
+            ("beats_baseline", bool),
         ],
     )
-    return outputs(best_name, float(best["test_rmse"]), best_test_json)
+    return outputs(best_name, float(best["test_rmse"]), best_test_json, baseline_rmse, improvement, passed)
 
 
 @dsl.component(base_image=PIPELINE_IMAGE, install_kfp_package=False)

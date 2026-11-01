@@ -18,7 +18,7 @@ Steps pass data to each other as **artifacts** (files in GCS, such as parquet da
 |---|---|
 | `train_model` | trains one model type and returns its validation metrics |
 | `evaluate_model` | scores one trained model on the test split |
-| `select_best_model` | picks the best of the four on validation RMSE (any type can win) |
+| `select_best_model` | picks the best of the four on validation RMSE and checks it beats Linear Regression on test RMSE by more than 2% |
 | `write_leaderboard` | appends the run's leaderboard to BigQuery |
 | `register_model` | uploads the promoted model to the Vertex AI Model Registry and moves the `champion` alias to it |
 
@@ -27,7 +27,7 @@ Steps pass data to each other as **artifacts** (files in GCS, such as parquet da
 | Component | Does |
 |---|---|
 | `evaluate_champion` | loads the current `champion` and scores it on the same test split as the new model; reports `none` on the first run |
-| `decide_promotion` | promotes the new model only if its test RMSE is lower; logs the decision to BigQuery and to a Markdown report |
+| `decide_promotion` | promotes the new model only if it passed the baseline gate and beats the champion; logs the decision to BigQuery and to a Markdown report |
 
 ## `inference.py`: predictions
 

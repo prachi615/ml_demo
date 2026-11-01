@@ -66,3 +66,14 @@ def test_should_promote_rules():
     assert not should_promote(5.5, 5.0)[0]  # worse
     assert not should_promote(4.95, 5.0, min_improvement_pct=2.0)[0]  # better, but < 2%
     assert should_promote(4.8, 5.0, min_improvement_pct=2.0)[0]  # 4% better
+
+
+def test_beats_baseline_needs_more_than_two_percent():
+    """The best model must beat linear regression by strictly more than 2%."""
+    from storm_prediction.metrics import beats_baseline
+
+    assert beats_baseline(9.7, 10.0)[0]  # 3% better
+    assert not beats_baseline(9.8, 10.0)[0]  # exactly 2%: not "more than"
+    assert not beats_baseline(9.9, 10.0)[0]  # 1% better
+    assert not beats_baseline(10.0, 10.0)[0]  # linear regression itself won: 0%
+    assert not beats_baseline(10.5, 10.0)[0]  # worse
