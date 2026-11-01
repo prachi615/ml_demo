@@ -1,14 +1,66 @@
-"""Batch inference component.
+"""Batch inference components: load the champion and forecast next week.
 
 Scoring runs inside a pipeline component instead of Vertex AI's built-in batch
 prediction job: the saved model is a scikit-learn pipeline that may contain
 XGBoost, which the prebuilt scikit-learn serving container cannot load.
 """
 
+from typing import NamedTuple
+
 from kfp import dsl
 from kfp.dsl import Dataset, Input, Model, Output
 
 from storm_prediction.config import PIPELINE_IMAGE
+
+
+@dsl.component(base_image=PIPELINE_IMAGE, install_kfp_package=False)
+def load_registered_model(
+    project: str,
+    location: str,
+    model_display_name: str,
+    alias: str,
+    model: Output[Model],
+) -> NamedTuple("Outputs", [("model_type", str), ("version_name", str)]):
+    """Fetch a model version from the Vertex AI Model Registry by alias.
+
+    Resolves ``<model_display_name>@<alias>`` (normally ``champion``) and
+    downloads its artifact directory from Cloud Storage.
+
+    Args:
+        project: GCP project of the registry.
+        location: Vertex AI region.
+        model_display_name: Registry entry name.
+        alias: Version alias to load, normally ``champion``.
+        model: Output directory; receives ``model.joblib``.
+
+    Returns:
+        model_type: Model type read from the version's labels.
+        version_name: ``<resource name>@<version id>``, recorded with predictions.
+
+    Raises:
+        RuntimeError: If no model with that name is registered yet.
+    """
+    from typing import NamedTuple
+
+    from google.cloud import aiplatform
+
+    from storm_prediction.gcp import download_gcs_dir
+
+    aiplatform.init(project=project, location=location)
+    models = aiplatform.Model.list(filter=f'display_name="{model_display_name}"')
+    if not models:
+        raise RuntimeError(f"No model named {model_display_name!r} in the registry; run training first.")
+    # "<resource name>@<alias>" resolves to whichever version currently holds the alias.
+    registered = aiplatform.Model(model_name=f"{models[0].resource_name}@{alias}")
+
+    download_gcs_dir(registered.uri, model.path)
+    # register_model writes the type with dashes ("random-forest"); convert it back.
+    model_type = (registered.labels or {}).get("model_type", "unknown").replace("-", "_")
+    version_name = f"{registered.resource_name}@{registered.version_id}"
+    model.metadata.update({"model_type": model_type, "version": version_name, "alias": alias})
+
+    outputs = NamedTuple("Outputs", [("model_type", str), ("version_name", str)])
+    return outputs(model_type, version_name)
 
 
 @dsl.component(base_image=PIPELINE_IMAGE, install_kfp_package=False)

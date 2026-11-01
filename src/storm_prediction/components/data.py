@@ -35,18 +35,25 @@ def ingest_raw_storm_events(
         bq_dataset: Target dataset, e.g. ``storm_ml``.
         raw_table: Target table name, e.g. ``storm_events_raw``.
         start_year: First year to load (inclusive).
-        end_year: Last year to load (inclusive).
+        end_year: Last year to load (inclusive). ``0`` (the default in the configs)
+            means "the current year", resolved when the step runs, so a monthly
+            schedule keeps picking up newly published years.
         enabled: If False, skip the copy and reuse the existing table.
 
     Returns:
         The fully qualified raw table id, ``project.dataset.table``.
     """
     import logging
+    from datetime import datetime, timezone
 
     from storm_prediction.gcp import render_sql, run_query
 
     logging.basicConfig(level=logging.INFO)
     table_id = f"{project}.{bq_dataset}.{raw_table}"
+    # Resolve "current year" at run time, not at schedule-creation time. The
+    # wildcard query simply skips years NOAA has not published yet.
+    if end_year <= 0:
+        end_year = datetime.now(timezone.utc).year
     if not enabled:
         logging.info("Raw ingestion disabled; reusing existing table %s", table_id)
         return table_id
@@ -59,6 +66,7 @@ def ingest_raw_storm_events(
         start_year=start_year,
         end_year=end_year,
     )
+    logging.info("Loading NOAA storm events %s-%s into %s", start_year, end_year, table_id)
     run_query(sql, project=project, location=bq_location)
     return table_id
 
@@ -167,52 +175,6 @@ def extract_training_splits(
     return outputs(
         str(split.train_end.date()), str(split.val_end.date()), str(split.test_end.date())
     )
-
-
-@dsl.component(base_image=PIPELINE_IMAGE, install_kfp_package=False)
-def extract_evaluation_window(
-    project: str,
-    bq_location: str,
-    features_table_id: str,
-    lookback_weeks: int,
-    eval_data: Output[Dataset],
-) -> int:
-    """Extract the most recent labelled weeks to check how the champion is doing.
-
-    Args:
-        project: GCP project used to run the query.
-        bq_location: BigQuery location.
-        features_table_id: Fully qualified feature table id.
-        lookback_weeks: How many of the latest labelled weeks to include.
-        eval_data: Output parquet with the evaluation rows.
-
-    Returns:
-        The number of rows extracted.
-
-    Raises:
-        ValueError: If no labelled rows fall in the window.
-    """
-    from storm_prediction.gcp import read_query
-
-    df = read_query(
-        f"""
-        SELECT *
-        FROM `{features_table_id}`
-        WHERE NOT is_forecast_row
-          AND event_count IS NOT NULL
-          -- keep only the latest `lookback_weeks` labelled weeks
-          AND week_start > DATE_SUB(
-                (SELECT MAX(week_start) FROM `{features_table_id}` WHERE NOT is_forecast_row),
-                INTERVAL {int(lookback_weeks)} WEEK)
-        """,
-        project=project,
-        location=bq_location,
-    )
-    if df.empty:
-        raise ValueError("Evaluation window is empty")
-    df.to_parquet(eval_data.path, index=False)
-    eval_data.metadata["rows"] = len(df)
-    return len(df)
 
 
 @dsl.component(base_image=PIPELINE_IMAGE, install_kfp_package=False)

@@ -2,15 +2,15 @@
 
 End-to-end MLOps project that forecasts **how many severe storm events each US state will see next week**.
 It uses the public **NOAA Storm Events** database in **BigQuery** and runs on **Vertex AI Pipelines** (Kubeflow Pipelines v2).
-It has three pipelines (training, evaluation/monitoring, batch inference) and a GitHub Actions CI/CD workflow.
+It has two pipelines, a **monthly training pipeline** (which ends with an evaluation stage) and a **weekly batch inference pipeline**, plus a GitHub Actions CI/CD workflow.
 
 | | |
 |---|---|
 | **Data** | `bigquery-public-data.noaa_historic_severe_storms.storms_*` (NOAA NCEI Storm Events, 1950 to present) |
-| **Storage** | BigQuery (raw table, feature table, leaderboard, monitoring, predictions) |
+| **Storage** | BigQuery (raw table, feature table, leaderboard, evaluations, predictions) |
 | **Task** | Regression: weekly storm event count per state, one week ahead |
 | **Baselines** | 1. Linear Regression (OLS) 2. Ridge Regression (L2-regularised linear) |
-| **Challengers** | 3. Random Forest 4. **XGBoost** |
+| **Non-linear models** | 3. Random Forest 4. **XGBoost** |
 | **Orchestration** | Vertex AI Pipelines, KFP v2 SDK, Vertex AI Model Registry, pipeline schedules |
 | **CI/CD** | GitHub Actions + Workload Identity Federation + Artifact Registry (Docker and KFP templates) |
 
@@ -25,20 +25,16 @@ flowchart LR
         RAW[(storm_ml.storm_events_raw)]
         FEAT[(storm_ml.storm_features_weekly)]
         LB[(model_leaderboard)]
-        MON[(model_monitoring)]
+        EVT[(model_evaluations)]
         PRED[(storm_predictions)]
     end
 
-    subgraph TP[Training pipeline]
+    subgraph TP[Training pipeline - monthly + on deploy]
         T1[ingest] --> T2[build features] --> T3[time split]
         T3 --> LR[Linear Reg] & RI[Ridge] & RF[Random Forest] & XG[XGBoost]
-        LR & RI & RF & XG --> EV[evaluate on test] --> SEL[select best]
-        SEL --> REG{beats baselines?} -->|yes| MR[Model Registry<br/>@champion]
-    end
-
-    subgraph EP[Evaluation pipeline - weekly]
-        E1[refresh features] --> E2[load @champion] --> E3[score last N weeks]
-        E3 --> E4[vs naive + training RMSE] -->|degraded| RT[trigger retraining]
+        LR & RI & RF & XG --> EV[score on test] --> SEL[best of 4]
+        SEL --> CH[evaluate champion<br/>on same test weeks]
+        CH --> DEC{new model<br/>better?} -->|yes| MR[Model Registry<br/>@champion]
     end
 
     subgraph IP[Batch inference pipeline - weekly]
@@ -47,10 +43,9 @@ flowchart LR
 
     PUB --> T1 --> RAW --> T2 --> FEAT
     SEL --> LB
-    E4 --> MON
+    DEC --> EVT
     I4 --> PRED
-    MR -.-> E2 & I3
-    RT -.-> TP
+    MR -.-> CH & I3
 ```
 
 ## 2. Dataset and problem framing
@@ -92,12 +87,15 @@ All are fit on `log1p(count)` through `TransformedTargetRegressor`, so the compa
 |---|---|---|---|
 | 1 | `LinearRegression` | baseline | plain OLS |
 | 2 | `Ridge` | baseline | L2 regularisation, stable with correlated lags |
-| 3 | `RandomForestRegressor` | challenger | non-linear and interaction effects |
-| 4 | `XGBRegressor` | challenger | gradient-boosted trees (`hist`) |
+| 3 | `RandomForestRegressor` | non-linear | non-linear and interaction effects |
+| 4 | `XGBRegressor` | non-linear | gradient-boosted trees (`hist`) |
 
-**Selection rule:** the winner is chosen on validation RMSE and reported on test RMSE.
-It is registered only if it is a challenger **and** beats the best linear baseline on test RMSE by at least `min_improvement_pct` (default 2%).
-In the registry, a new version takes the `champion` alias only if its test RMSE beats the current champion's; otherwise it is tagged `challenger`.
+**Selection rule:** every training run trains all four models and picks **the best of the four for this dataset**, meaning the lowest validation RMSE.
+Any of the four can win, including a linear baseline.
+The baselines stay in the line-up as a reference point in the leaderboard.
+
+**Promotion rule:** the winner is then scored on the test weeks, and so is the current champion.
+The winner replaces the champion only if its test RMSE is lower, by at least `min_improvement_pct` percent (default `0`, meaning any improvement).
 
 Metrics logged per model: RMSE, MAE, R², WAPE, Poisson deviance, bias.
 
@@ -105,18 +103,21 @@ Metrics logged per model: RMSE, MAE, R², WAPE, Poisson deviance, bias.
 
 | Pipeline | File | Schedule | Output |
 |---|---|---|---|
-| **Training** | `pipelines/training_pipeline.py` | on deploy / on demand / auto-retrain | leaderboard in BQ + Markdown report in Vertex UI, model version in the Model Registry |
-| **Evaluation** | `pipelines/evaluation_pipeline.py` | weekly (Mon 05:00) | `model_monitoring` row; triggers retraining if needed |
-| **Batch inference** | `pipelines/batch_inference_pipeline.py` | weekly (Mon 06:00) | `storm_predictions` rows (forecast + `risk_level`) |
+| **Training** (includes evaluation) | `pipelines/training_pipeline.py` | **monthly** (1st of the month, 04:00 UTC), plus once on every deploy | leaderboard and promotion decision in BigQuery; new champion in the Model Registry if it won |
+| **Batch inference** | `pipelines/batch_inference_pipeline.py` | weekly (Mon 06:00 UTC) | `storm_predictions` rows (forecast + `risk_level`) |
 
-**Training:** `ingest → build features → split → 4× (train → evaluate) in parallel → select best → write leaderboard → [if beats baselines] register`.
+There is no separate evaluation pipeline and no weekly evaluation. Evaluation runs only as the last stage of a training run.
+There is also no automatic retraining trigger: retraining happens on the monthly schedule (and on deploy), whatever the current model's performance.
 
-**Evaluation (monitoring):** this pipeline refreshes the data and loads `model@champion`.
-It scores the champion on the latest `lookback_weeks` of labelled data and compares it with:
-- its own training-time test RMSE (stored as a model label); a degradation above `max_rmse_degradation_pct` is flagged;
-- naive baselines (persistence = last week; seasonal naive = 3-year same-week mean); a champion that does no better than naive is flagged.
+**Training stage:** `ingest → build features → time split → 4× (train → score on test) in parallel → best of 4 (validation RMSE) → write leaderboard`.
 
-If flagged and `auto_retrain=true`, it submits the training pipeline template from Artifact Registry.
+**Evaluation stage (starts after training finishes):**
+1. Load the current `champion` from the Model Registry and score it on **the same test weeks** as the new model. Both models are scored on data neither was trained on, so the comparison is fair.
+2. Decide: promote if the new model's test RMSE is lower (by `min_improvement_pct`). The first run (no champion yet), or a champion that can't score the current features, always promotes.
+3. Log the decision to BigQuery (`model_evaluations`) and as a Markdown report in the Vertex AI UI.
+4. If promoted, register the new model as a new version and move the `champion` alias to it. Otherwise nothing is registered and the old champion stays live.
+
+Each monthly run loads data up to the current year (`end_year: 0`), so it trains on whatever NOAA has published since the last run.
 
 **Batch inference:** `refresh features → extract forecast rows → load @champion → predict → append to BigQuery`.
 Each prediction row carries `model_version`, `model_type`, `pipeline_job_name` and `scored_at` for lineage.
@@ -133,7 +134,7 @@ Each prediction row carries `model_version`, `model_type`, `pipeline_job_name` a
 | `storm_events_raw` | all pipelines (ingest) | one storm event |
 | `storm_features_weekly` | all pipelines (features) | state × week |
 | `model_leaderboard` | training | model × training run |
-| `model_monitoring` | evaluation | evaluation run |
+| `model_evaluations` | training (evaluation stage) | training run: new model vs champion, promoted or not |
 | `storm_predictions` | batch inference | state × forecast week × run |
 
 ## 5. Repository layout
@@ -203,13 +204,15 @@ make run-training ENV=dev
 ```bash
 make run-batch ENV=dev
 ```
-```bash
-make run-evaluation ENV=dev
-```
-Run training first: the evaluation and batch pipelines need a `champion` model in the registry.
+Run training first: batch inference needs a `champion` model in the registry.
 
 ### 6.4 Useful queries
 ```sql
+-- promotion history: was the new model better than the champion?
+SELECT evaluated_at, new_model_type, new_test_rmse, champion_model_type, champion_test_rmse, promoted, reason
+FROM `storm_ml.model_evaluations`
+ORDER BY evaluated_at DESC;
+
 -- leaderboard of the latest training run
 SELECT model_type, is_baseline, val_rmse, test_rmse, test_mae, test_r2
 FROM `storm_ml.model_leaderboard`
@@ -274,8 +277,8 @@ Nothing runs when a pull request is opened or updated. Every run starts after a 
 1. Authenticates to GCP with Workload Identity Federation (no service-account keys).
 2. Builds and pushes the component image, tagged `sha-<commit>`.
 3. Compiles the pipelines against that image and publishes the templates to the Artifact Registry KFP repo, tagged `latest`, `sha-<commit>`, the version (`v1-2-0-rc1`) and the environment name.
-4. Submits a training run.
-5. Recreates the evaluation and batch-inference **schedules** so they point at the new template version.
+4. Submits one training run right away, so the new code produces a champion without waiting for the 1st of the month.
+5. Recreates the two **schedules**, monthly training and weekly batch inference, so they point at the new template version.
 
 ### One-time GitHub setup
 
@@ -305,15 +308,17 @@ Nothing runs when a pull request is opened or updated. Every run starts after a 
 - **Features are computed in BigQuery.** Window functions over about 1,300 weeks × 51 states are cheap there, and the SQL is the single source of truth for training and inference, so the two cannot skew apart.
 - **Leakage control.** Every window ends at `1 PRECEDING`, the splits are chronological, and a unit test fails if `CURRENT ROW` ever appears in a window.
 - **Log-target for every model.** Event counts are heavy-tailed, and fitting `log1p(y)` stops linear models from being dominated by a few extreme weeks. Predictions are clipped at 0.
-- **Baselines act as a gate.** A complex model ships only if it measurably beats both linear baselines. The evaluation pipeline adds model-free naive baselines as a second floor.
-- **Champion/challenger through registry aliases.** Downstream pipelines always resolve `model@champion`, so promotion and rollback are a single alias move with no redeploy.
+- **Best of four, every month.** Each retraining run re-runs the whole model comparison on the latest data, so the chosen model type can change over time, for example from XGBoost to Ridge.
+- **Like-for-like promotion.** The new model and the champion are compared on identical test weeks, never against an RMSE recorded months earlier on different data.
+- **Champion alias in the registry.** Batch inference always resolves `model@champion`, so promotion and rollback are a single alias move with no redeploy.
+- **Simple schedule instead of triggers.** Retraining is a fixed monthly schedule, not a drift trigger. That is predictable in cost and easy to reason about, and NOAA data only arrives in monthly batches anyway.
 - **Caching is disabled on data steps.** BigQuery tables change between runs; model training on identical inputs can still use the cache.
 
 ## 9. Limitations and next steps
 
-- The SQL follows the documented schema of the public NOAA tables. Before the first production run, check the year range (`end_year`) and the `event_type` spellings against the live dataset.
+- The SQL follows the documented schema of the public NOAA tables. Before the first production run, check the `event_type` spellings against the live dataset.
 - NOAA publishes Storm Events with a delay of a few months, so the "next week" forecast is relative to the latest available data. For true real-time use, add a near-real-time source such as NWS Local Storm Reports.
 - Add exogenous weather drivers, for example `bigquery-public-data.noaa_gsod` (temperature, precipitation, wind) joined by state.
 - Add hyperparameter tuning (Vertex AI Vizier) for XGBoost and Random Forest.
 - Add prediction intervals (quantile XGBoost) and a Looker Studio dashboard on `storm_predictions`.
-- Add feature-drift monitoring on the feature table, beyond the current performance monitoring.
+- There is no performance monitoring between monthly runs. If that is ever needed, add a dashboard on `model_evaluations` and `storm_predictions`, or Vertex AI Model Monitoring.

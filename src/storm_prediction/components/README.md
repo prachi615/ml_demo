@@ -10,7 +10,6 @@ Steps pass data to each other as **artifacts** (files in GCS, such as parquet da
 | `ingest_raw_storm_events` | runs `sql/ingest_raw.sql` (public NOAA data → our raw table) |
 | `build_feature_table` | runs `sql/build_features.sql` (raw → weekly features) |
 | `extract_training_splits` | labelled rows → train / val / test parquet, split by time |
-| `extract_evaluation_window` | latest N labelled weeks, for monitoring |
 | `extract_scoring_rows` | forecast rows (next week, one per state), for batch inference |
 
 ## `training.py`: model building
@@ -18,24 +17,23 @@ Steps pass data to each other as **artifacts** (files in GCS, such as parquet da
 | Component | Does |
 |---|---|
 | `train_model` | trains one model type and returns its validation metrics |
-| `evaluate_model` | scores a model on any labelled dataset (test split or recent weeks) |
-| `select_best_model` | picks the winner on validation RMSE and checks that it beats the linear baselines on test RMSE |
+| `evaluate_model` | scores one trained model on the test split |
+| `select_best_model` | picks the best of the four on validation RMSE (any type can win) |
 | `write_leaderboard` | appends the run's leaderboard to BigQuery |
-| `register_model` | uploads to the Vertex AI Model Registry and moves the `champion` / `challenger` alias |
+| `register_model` | uploads the promoted model to the Vertex AI Model Registry and moves the `champion` alias to it |
 
-## `monitoring.py`: keeping the model honest
+## `evaluation.py`: new model vs champion (runs after training)
 
 | Component | Does |
 |---|---|
-| `load_registered_model` | downloads `<model>@champion` from the registry |
-| `evaluate_naive_baselines` | scores "same as last week" and "same week in past years" forecasts |
-| `check_model_health` | flags drift or a model no better than naive, and logs to BigQuery |
-| `trigger_training_pipeline` | submits a retraining run |
+| `evaluate_champion` | loads the current `champion` and scores it on the same test split as the new model; reports `none` on the first run |
+| `decide_promotion` | promotes the new model only if its test RMSE is lower; logs the decision to BigQuery and to a Markdown report |
 
 ## `inference.py`: predictions
 
 | Component | Does |
 |---|---|
+| `load_registered_model` | downloads `<model>@champion` from the registry |
 | `batch_predict` | forecasts next week per state and appends the results to BigQuery with a risk level |
 
 ## Conventions

@@ -4,7 +4,7 @@ Command-line entry points, used by CI, by the Makefile and by people running the
 
 ## `compile_pipelines.py`
 
-Compiles the three pipelines from Python into YAML templates that Vertex AI can run. It can also upload them to Artifact Registry.
+Compiles the two pipelines from Python into YAML templates that Vertex AI can run. It can also upload them to Artifact Registry.
 
 ```bash
 PIPELINE_IMAGE=us-central1-docker.pkg.dev/my-proj/storm-ml/storm-pipeline:sha-abc python scripts/compile_pipelines.py --output-dir build
@@ -27,15 +27,18 @@ python scripts/run_pipeline.py --pipeline training --config configs/dev.yaml
 ```
 
 ```bash
+python scripts/run_pipeline.py --pipeline training --config configs/prod.yaml --schedule "0 4 1 * *"
+```
+
+```bash
 python scripts/run_pipeline.py --pipeline batch_inference --config configs/prod.yaml --schedule "0 6 * * 1"
 ```
 
 | Option | Meaning |
 |---|---|
-| `--pipeline` | `training`, `evaluation` or `batch_inference` |
+| `--pipeline` | `training` or `batch_inference` |
 | `--config` | environment config file |
 | `--template` | compiled YAML or Artifact Registry URL (default: `build/<pipeline>.yaml`) |
-| `--training-template` | template the evaluation pipeline submits when it triggers retraining |
 | `--schedule` | cron expression; replaces any existing schedule with the same name |
 | `--no-cache` | disable Vertex AI step caching |
 | `--sync` | wait for the run to finish |

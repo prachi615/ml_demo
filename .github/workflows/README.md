@@ -19,7 +19,7 @@ Nothing runs when a pull request is opened. A run starts only after a merge, a t
 |---|---|
 | `plan` | Works out the target environment and version, and runs the promotion guards |
 | `ci` | `ruff` lint, `pytest` with coverage, compile all pipelines |
-| `deploy` | Build/push the image, publish pipeline templates, start a training run, recreate schedules |
+| `deploy` | Build/push the image, publish pipeline templates, start a training run, recreate the monthly training and weekly batch inference schedules |
 | `promote-rc` | RC only: point the `rc` branch at the tag and open/update the release PR |
 | `release` | Prod only: create the `vX.Y.Z` tag and GitHub release |
 

@@ -59,3 +59,30 @@ def improvement_pct(candidate_rmse: float, reference_rmse: float) -> float:
     if reference_rmse <= 0:
         return 0.0
     return 100.0 * (reference_rmse - candidate_rmse) / reference_rmse
+
+
+def should_promote(
+    new_rmse: float, champion_rmse: float | None, min_improvement_pct: float = 0.0
+) -> tuple[bool, str]:
+    """Decide whether a newly trained model should replace the current champion.
+
+    Both RMSEs must be measured on the same test weeks, otherwise the comparison
+    is meaningless.
+
+    Args:
+        new_rmse: Test RMSE of the newly trained best model.
+        champion_rmse: Test RMSE of the current champion on the same test weeks,
+            or None if there is no usable champion (first run, or the champion
+            can no longer score the current features).
+        min_improvement_pct: How much better (in percent) the new model must be.
+            0 means "any improvement".
+
+    Returns:
+        A tuple ``(promote, reason)`` with a human-readable reason.
+    """
+    if champion_rmse is None:
+        return True, "no usable champion yet"
+    gain = improvement_pct(new_rmse, champion_rmse)
+    if new_rmse < champion_rmse and gain >= min_improvement_pct:
+        return True, f"new model is {gain:.2f}% better than the champion"
+    return False, f"new model is not better enough ({gain:.2f}% vs required {min_improvement_pct:.2f}%)"

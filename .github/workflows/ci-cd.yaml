@@ -8,6 +8,9 @@
 #   rc             --PR (approved + merged)--> main   : CI -> check main == latest RC -> deploy PROD
 #                                                         -> create GitHub release vX.Y.Z
 #
+# Every deploy publishes the pipelines, starts one training run, and (re)creates two
+# schedules: monthly retraining and weekly batch inference.
+#
 # Prod only ever runs code that was already deployed and tested as an RC: the `plan` job
 # fails if the merged tree on main differs from the tree of an RC tag.
 #
@@ -209,6 +212,8 @@ jobs:
             --tag "${{ steps.vars.outputs.version_tag }}" \
             --tag "${DEPLOY_ENV}"
 
+      # One training run right away, so new code gets a champion without waiting
+      # for the 1st of the month. Skippable on manual runs.
       - name: Submit training pipeline
         if: github.event_name != 'workflow_dispatch' || inputs.run_training
         run: |
@@ -217,19 +222,20 @@ jobs:
             --config "configs/${DEPLOY_ENV}.yaml" \
             --template "${{ steps.vars.outputs.kfp_host }}/storm-forecast-training/${{ steps.vars.outputs.tag }}"
 
-      - name: (Re)create evaluation + batch inference schedules
+      - name: (Re)create monthly training + weekly batch inference schedules
         run: |
           HOST="${{ steps.vars.outputs.kfp_host }}"
           TAG="${{ steps.vars.outputs.tag }}"
           CFG="configs/${DEPLOY_ENV}.yaml"
-          EVAL_CRON=$(python -c "import yaml;print(yaml.safe_load(open('${CFG}'))['schedules']['evaluation'])")
+          TRAIN_CRON=$(python -c "import yaml;print(yaml.safe_load(open('${CFG}'))['schedules']['training'])")
           BATCH_CRON=$(python -c "import yaml;print(yaml.safe_load(open('${CFG}'))['schedules']['batch_inference'])")
 
-          python scripts/run_pipeline.py --pipeline evaluation --config "$CFG" \
-            --template "${HOST}/storm-forecast-evaluation/${TAG}" \
-            --training-template "${HOST}/storm-forecast-training/${TAG}" \
-            --schedule "$EVAL_CRON"
+          # Monthly retraining (training + evaluation against the champion).
+          python scripts/run_pipeline.py --pipeline training --config "$CFG" \
+            --template "${HOST}/storm-forecast-training/${TAG}" \
+            --schedule "$TRAIN_CRON"
 
+          # Weekly forecast with whichever model is champion at that moment.
           python scripts/run_pipeline.py --pipeline batch_inference --config "$CFG" \
             --template "${HOST}/storm-forecast-batch-inference/${TAG}" \
             --schedule "$BATCH_CRON"

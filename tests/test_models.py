@@ -54,3 +54,15 @@ def test_metrics():
     assert m["rmse"] == 0 and m["mae"] == 0 and m["wape"] == 0
     assert improvement_pct(9.0, 10.0) == pytest.approx(10.0)
     assert improvement_pct(1.0, 0.0) == 0.0
+
+
+def test_should_promote_rules():
+    """New model wins only if it is strictly better (and by the margin, if one is set)."""
+    from storm_prediction.metrics import should_promote
+
+    assert should_promote(5.0, None)[0]  # first run: nothing to beat
+    assert should_promote(4.9, 5.0)[0]  # better
+    assert not should_promote(5.0, 5.0)[0]  # equal is not better
+    assert not should_promote(5.5, 5.0)[0]  # worse
+    assert not should_promote(4.95, 5.0, min_improvement_pct=2.0)[0]  # better, but < 2%
+    assert should_promote(4.8, 5.0, min_improvement_pct=2.0)[0]  # 4% better

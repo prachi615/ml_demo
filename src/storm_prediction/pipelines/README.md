@@ -1,25 +1,27 @@
 # `src/storm_prediction/pipelines/`
 
-The three pipeline definitions. Each is a `@dsl.pipeline` function that wires components together into a graph of steps.
+The two pipeline definitions. Each is a `@dsl.pipeline` function that wires components together into a graph of steps.
 `__init__.py` exposes them as `PIPELINES` for the scripts and tests.
 
-## `training_pipeline.py` (`storm-forecast-training`)
+## `training_pipeline.py` (`storm-forecast-training`): monthly
 
-```
-ingest → build features → time split ─┬─ train linear_regression → evaluate ─┐
-                                      ├─ train ridge             → evaluate ─┤
-                                      ├─ train random_forest     → evaluate ─┼→ select best ─┬→ write leaderboard (BigQuery)
-                                      └─ train xgboost           → evaluate ─┘               └→ [beats baselines?] register model
-```
-The four training branches run in parallel. A model is registered only if a challenger beats the best linear baseline by `min_improvement_pct`.
+Runs on the 1st of every month (04:00 UTC) and once on every deploy. It has two stages, and evaluation only starts after training has finished.
 
-## `evaluation_pipeline.py` (`storm-forecast-evaluation`)
+**Training stage**
+```
+ingest → build features → time split ─┬─ train linear_regression → score on test ─┐
+                                      ├─ train ridge             → score on test ─┤
+                                      ├─ train random_forest     → score on test ─┼→ best of 4 ─→ write leaderboard (BigQuery)
+                                      └─ train xgboost           → score on test ─┘
+```
+The four branches run in parallel. The best of the four is the model with the lowest validation RMSE; any of them can win.
 
+**Evaluation stage**
 ```
-ingest → build features → recent weeks ─┬→ evaluate champion ─┬→ health check (BigQuery) → [flagged and auto_retrain?] trigger training
-load champion ──────────────────────────┘  naive baselines ───┘
+best of 4 ─→ evaluate current champion on the same test weeks ─→ decide promotion ─→ [new model better?] register as champion
+                                                                       └─→ model_evaluations (BigQuery)
 ```
-Runs weekly. The health check flags the champion if its RMSE degrades by more than `max_rmse_degradation_pct` against training, or if it is no better than a naive forecast.
+The new model replaces the champion only if its test RMSE is lower, by at least `min_improvement_pct` (default 0). On the very first run there is no champion, so the new model is promoted.
 
 ## `batch_inference_pipeline.py` (`storm-forecast-batch-inference`)
 
@@ -27,7 +29,7 @@ Runs weekly. The health check flags the champion if its RMSE degrades by more th
 ingest → build features → forecast rows ─┬→ batch predict → BigQuery (storm_predictions)
 load champion ───────────────────────────┘
 ```
-Runs weekly, after the evaluation pipeline.
+Runs weekly (Mondays 06:00 UTC) with whichever model is champion at that moment.
 
 ## Notes
 

@@ -4,9 +4,9 @@ One YAML file per environment. `scripts/run_pipeline.py` reads them and turns th
 
 | File | Used for | Differences |
 |---|---|---|
-| `dev.yaml` | the `dev` branch | loads 2010+ data only (faster, cheaper), smaller models, no auto-retraining |
-| `rc.yaml` | release candidates | same as prod, but auto-retraining off |
-| `prod.yaml` | `main` / production | full history (2000+), auto-retraining on |
+| `dev.yaml` | the `dev` branch | loads 2010+ data only (faster, cheaper), smaller random forest / XGBoost |
+| `rc.yaml` | release candidates | identical to prod, so the RC is tested with production settings |
+| `prod.yaml` | `main` / production | full history (2000+) |
 
 ## Placeholders
 
@@ -19,10 +19,9 @@ Loading fails with a clear error if a placeholder can't be resolved.
 |---|---|
 | `project_id`, `region`, `pipeline_root`, `service_account` | where and as whom pipelines run |
 | `bigquery.*` | dataset (must be in `US`) and table names |
-| `data.*` | years to load, validation/test split sizes |
+| `data.*` | years to load (`end_year: 0` = current year), validation/test split sizes |
 | `model.*` | Model Registry name, optional serving image |
-| `training.*` | registration gate (`min_improvement_pct`) and per-model hyperparameters |
-| `evaluation.*` | monitoring window, allowed RMSE degradation, auto-retraining switch |
-| `schedules.*` | cron expressions (UTC) for the evaluation and batch inference schedules |
+| `training.*` | promotion margin over the champion (`min_improvement_pct`) and per-model hyperparameters |
+| `schedules.*` | cron expressions (UTC): `training` = monthly retraining, `batch_inference` = weekly forecast |
 
 To change a model's hyperparameters, edit `training.hyperparameters.<model>`. No code change is needed.

@@ -12,8 +12,7 @@ from storm_prediction.components.data import (
     extract_scoring_rows,
     ingest_raw_storm_events,
 )
-from storm_prediction.components.inference import batch_predict
-from storm_prediction.components.monitoring import load_registered_model
+from storm_prediction.components.inference import batch_predict, load_registered_model
 
 PIPELINE_NAME = "storm-forecast-batch-inference"
 
@@ -28,7 +27,7 @@ def batch_inference_pipeline(
     features_table: str = "storm_features_weekly",
     predictions_table: str = "storm_predictions",
     start_year: int = 2000,
-    end_year: int = 2024,
+    end_year: int = 0,
     refresh_raw_data: bool = True,
     model_display_name: str = "storm-weekly-event-forecaster",
     model_alias: str = "champion",
@@ -44,7 +43,7 @@ def batch_inference_pipeline(
         features_table: Weekly feature table name.
         predictions_table: Table the forecasts are appended to.
         start_year: First year of NOAA data to load.
-        end_year: Last year of NOAA data to load.
+        end_year: Last year of NOAA data to load; 0 means the current year.
         refresh_raw_data: Re-copy the raw data from the public dataset.
         model_display_name: Model Registry entry name.
         model_alias: Version alias to score with (normally ``champion``).

@@ -14,7 +14,7 @@ PROJECT_ID=my-storm-dev GITHUB_REPO=prachi615/ml_demo ./infra/setup_gcp.sh
 |---|---|---|
 | APIs | Vertex AI, BigQuery, Storage, Artifact Registry, IAM | services the pipelines use |
 | GCS bucket | `gs://<project>-storm-ml` | pipeline artifacts and staging files |
-| BigQuery dataset | `storm_ml` (location `US`) | raw, feature, leaderboard, monitoring and prediction tables |
+| BigQuery dataset | `storm_ml` (location `US`) | raw, feature, leaderboard, evaluation and prediction tables |
 | Artifact Registry (Docker) | `storm-ml` | the component container image |
 | Artifact Registry (KFP) | `storm-pipelines` | compiled pipeline templates |
 | Service account | `vertex-pipelines` | identity the pipelines run as |
