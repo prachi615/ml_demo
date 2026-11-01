@@ -155,6 +155,7 @@ Each prediction row carries `model_version`, `model_type`, `pipeline_job_name` a
 │   ├── components/                  #   KFP components (pipeline steps)                [README]
 │   ├── pipelines/                   #   training, evaluation, batch inference          [README]
 │   └── models.py features.py metrics.py data.py gcp.py config.py
+├── notebooks/                       # local_training.ipynb: real metrics in Colab       [README]
 ├── tests/                           # unit + pipeline compilation tests                [README]
 ├── Dockerfile                       # single image used by every component
 └── Makefile  pyproject.toml  requirements*.txt
@@ -211,7 +212,12 @@ make run-batch ENV=dev
 ```
 Run training first: batch inference needs a `champion` model in the registry.
 
-### 6.4 Useful queries
+### 6.4 Get real metrics without Vertex AI (Colab + BigQuery sandbox)
+`notebooks/local_training.ipynb` runs the training stage in Google Colab against the free BigQuery sandbox.
+It prints the 4-model leaderboard, the best model, the Linear Regression check, reference forecasts, errors by state and month, and feature importance.
+Setup steps are in `notebooks/README.md`.
+
+### 6.5 Useful queries
 ```sql
 -- promotion history: was the new model better than the champion?
 SELECT evaluated_at, new_model_type, new_test_rmse, champion_model_type, champion_test_rmse, promoted, reason
